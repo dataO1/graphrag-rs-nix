@@ -24,6 +24,7 @@ let
         chat_model = cfg.chat.openai.model;
         api_key = cfg.chat.openai.apiKey;
         temperature = cfg.chat.temperature;
+        timeout_seconds = cfg.chat.openai.timeoutSeconds;
       } // lib.optionalAttrs (cfg.chat.maxTokens != null) {
         max_tokens = cfg.chat.maxTokens;
       };
@@ -288,6 +289,11 @@ in
           type = lib.types.str;
           default = "";
           description = "Bearer token. Empty disables the Authorization header.";
+        };
+        timeoutSeconds = lib.mkOption {
+          type = lib.types.int;
+          default = 600;
+          description = "HTTP request timeout in seconds (upstream default is 60). Set higher for slow local models.";
         };
       };
 
