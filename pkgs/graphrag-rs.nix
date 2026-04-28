@@ -99,6 +99,41 @@ let
     }
 }"
 
+    # 4b. Plumb endpoint: None into the 9 hand-rolled `Self { ... }`
+    #     constructions inside `pub fn examples()`. Each closes with
+    #     `dimensions: Some(N),\n                },\n            ),`
+    #     which gives us a unique anchor per dimension. 1024 matches 7
+    #     of the 9 (the API providers); 384 and 1536 match 1 each.
+    substituteInPlace graphrag-core/src/embeddings/config.rs \
+      --replace-fail \
+        "                    dimensions: Some(384),
+                },
+            )," \
+        "                    dimensions: Some(384),
+                    endpoint: None,
+                },
+            ),"
+
+    substituteInPlace graphrag-core/src/embeddings/config.rs \
+      --replace-fail \
+        "                    dimensions: Some(1536),
+                },
+            )," \
+        "                    dimensions: Some(1536),
+                    endpoint: None,
+                },
+            ),"
+
+    substituteInPlace graphrag-core/src/embeddings/config.rs \
+      --replace-fail \
+        "                    dimensions: Some(1024),
+                },
+            )," \
+        "                    dimensions: Some(1024),
+                    endpoint: None,
+                },
+            ),"
+
     # 5. Plumb endpoint through TOML→runtime conversion.
     substituteInPlace graphrag-core/src/embeddings/config.rs \
       --replace-fail \
@@ -192,11 +227,7 @@ let
 
   workspace = craneLib.buildPackage (commonArgs // {
     inherit cargoArtifacts;
-    # BISECT: source patch temporarily disabled to isolate compile failure
-    # cause. Re-enable by appending sourcePatchScript once we have the
-    # actual error log identifying which line of the patch is wrong.
-    prePatch = manifestPatchScript;
-    # prePatch = manifestPatchScript + "\n" + sourcePatchScript;
+    prePatch = manifestPatchScript + "\n" + sourcePatchScript;
   });
 
   server = workspace.overrideAttrs (_: { pname = "graphrag-server"; meta.mainProgram = "graphrag-server"; });
