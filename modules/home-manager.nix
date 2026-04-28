@@ -11,9 +11,43 @@ let
   # Schema is the upstream runtime config (graphrag-core::config::Config),
   # which is JSON-shaped (not TOML). Set null to skip — server runs with
   # env-var defaults only.
+  # Auto-generated pipeline config when chat.enable is true: synthesizes
+  # an `openai` (or `ollama`) section keyed off the new chat.* options so
+  # users don't have to hand-write JSON to enable the chat backend.
+  # Merges into pipelineConfig if both are set (explicit wins via
+  # `lib.recursiveUpdate`).
+  chatPipelineConfig = lib.optionalAttrs cfg.chat.enable (
+    if cfg.chat.backend == "openai" then {
+      openai = {
+        enabled = true;
+        base_url = cfg.chat.openai.baseUrl;
+        chat_model = cfg.chat.openai.model;
+        api_key = cfg.chat.openai.apiKey;
+        temperature = cfg.chat.temperature;
+      } // lib.optionalAttrs (cfg.chat.maxTokens != null) {
+        max_tokens = cfg.chat.maxTokens;
+      };
+    } else {
+      ollama = {
+        enabled = true;
+        host = cfg.chat.ollama.url;
+        port = cfg.chat.ollama.port;
+        chat_model = cfg.chat.ollama.model;
+        temperature = cfg.chat.temperature;
+      } // lib.optionalAttrs (cfg.chat.maxTokens != null) {
+        max_tokens = cfg.chat.maxTokens;
+      };
+    });
+
+  effectivePipelineConfig =
+    if cfg.pipelineConfig != null then
+      lib.recursiveUpdate chatPipelineConfig cfg.pipelineConfig
+    else if chatPipelineConfig != { } then chatPipelineConfig
+    else null;
+
   pipelineConfigFile =
-    if cfg.pipelineConfig == null then null
-    else (pkgs.formats.json { }).generate "graphrag-rs-pipeline.json" cfg.pipelineConfig;
+    if effectivePipelineConfig == null then null
+    else (pkgs.formats.json { }).generate "graphrag-rs-pipeline.json" effectivePipelineConfig;
 
   envVars = {
     EMBEDDING_BACKEND = cfg.embedding.backend;
@@ -185,6 +219,96 @@ in
       };
     };
 
+    # ---------- Chat LLM (entity extraction, query, gleaning) ----------
+    # Routed through graphrag-core's ChatClient enum (added in our
+    # openai-compat fork). When enabled, an `openai` (or `ollama`) section
+    # is synthesized into the pipelineConfig and POSTed to /config on
+    # startup so the runtime picks the right backend.
+    chat = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Enable the chat LLM in graphrag-rs's runtime pipeline (entity
+          extraction, query planning, answer generation). When true, a
+          minimal pipeline config is synthesized and auto-POSTed to
+          /config so graphrag-core wires the configured backend.
+
+          Without this, ingest still works (embeddings only) but the
+          graph stays at entity-count zero — there's no LLM to extract
+          entities + relationships from chunk text.
+        '';
+      };
+
+      backend = lib.mkOption {
+        type = lib.types.enum [ "openai" "ollama" ];
+        default = "openai";
+        description = ''
+          Which chat backend the pipeline uses. "openai" hits any
+          OpenAI-compat /chat/completions endpoint (vLLM, llama-server,
+          OpenAI itself, OpenRouter); "ollama" talks Ollama's native API.
+        '';
+      };
+
+      temperature = lib.mkOption {
+        type = lib.types.float;
+        default = 0.2;
+        description = "Sampling temperature for entity-extraction prompts.";
+      };
+
+      maxTokens = lib.mkOption {
+        type = lib.types.nullOr lib.types.int;
+        default = 2000;
+        description = "Maximum tokens to generate per chat call. Null = backend default.";
+      };
+
+      openai = {
+        baseUrl = lib.mkOption {
+          type = lib.types.str;
+          default = "http://127.0.0.1:8000/v1";
+          description = ''
+            Full OpenAI-compatible base URL including the version path.
+            Examples:
+              - http://127.0.0.1:17171/v1   llama-server (services.llama-server)
+              - http://127.0.0.1:8000/v1    vLLM
+              - https://api.openai.com/v1   real OpenAI
+          '';
+        };
+        model = lib.mkOption {
+          type = lib.types.str;
+          default = "gpt-4o-mini";
+          description = ''
+            Model name passed in the request body. For self-hosted
+            servers this is whatever GET /models reports; for llama-server
+            running a single GGUF, the filename without extension usually
+            works (e.g. "Qwen3.6-27B-Q4_K_M").
+          '';
+        };
+        apiKey = lib.mkOption {
+          type = lib.types.str;
+          default = "";
+          description = "Bearer token. Empty disables the Authorization header.";
+        };
+      };
+
+      ollama = {
+        url = lib.mkOption {
+          type = lib.types.str;
+          default = "http://localhost";
+          description = "Ollama host (used only when chat.backend = \"ollama\").";
+        };
+        port = lib.mkOption {
+          type = lib.types.port;
+          default = 11434;
+        };
+        model = lib.mkOption {
+          type = lib.types.str;
+          default = "llama3.1:8b";
+          description = "Ollama chat model identifier (e.g. \"llama3.1:8b\", \"qwen2.5:7b-instruct\").";
+        };
+      };
+    };
+
     pipelineConfig = lib.mkOption {
       type = lib.types.nullOr (pkgs.formats.json { }).type;
       default = null;
@@ -200,8 +324,8 @@ in
 
     applyPipelineConfig = lib.mkOption {
       type = lib.types.bool;
-      default = cfg.pipelineConfig != null;
-      defaultText = "auto: true if pipelineConfig is set";
+      default = cfg.pipelineConfig != null || cfg.chat.enable;
+      defaultText = "auto: true if pipelineConfig or chat.enable is set";
       description = "ExecStartPost POSTs the pipeline config to /config once /health is up.";
     };
 
