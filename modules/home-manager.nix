@@ -367,6 +367,10 @@ in
         (lib.mkIf cfg.applyPipelineConfig {
           ExecStartPost = pkgs.writeShellScript "graphrag-rs-apply-config" ''
             set -eu
+            # systemd ExecStartPost runs with an empty PATH; pull in coreutils
+            # explicitly so `sleep`, `seq`, etc. resolve. curl is referenced by
+            # absolute store path below for the same reason.
+            export PATH=${lib.makeBinPath [ pkgs.coreutils ]}
             # /config/* (not /api/config/*) — upstream registers /api/config
             # AFTER /api which shadows it; the flake's vendored patch renames
             # the prefix to /config to sidestep the conflict.
