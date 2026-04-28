@@ -192,8 +192,11 @@ let
 
   workspace = craneLib.buildPackage (commonArgs // {
     inherit cargoArtifacts;
-    # Full build also applies source-tree patches.
-    prePatch = manifestPatchScript + "\n" + sourcePatchScript;
+    # BISECT: source patch temporarily disabled to isolate compile failure
+    # cause. Re-enable by appending sourcePatchScript once we have the
+    # actual error log identifying which line of the patch is wrong.
+    prePatch = manifestPatchScript;
+    # prePatch = manifestPatchScript + "\n" + sourcePatchScript;
   });
 
   server = workspace.overrideAttrs (_: { pname = "graphrag-server"; meta.mainProgram = "graphrag-server"; });
