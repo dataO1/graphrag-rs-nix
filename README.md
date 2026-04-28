@@ -75,6 +75,79 @@ Code / opencode / crush.
   runs the server in its in-memory storage fallback. Vectors and graph
   state reset on every restart. Re-enabling Qdrant tracked in `TODO.md`.
 
+## Upstream dead-code discovery (2026-04-28)
+
+After end-to-end probing on a freshly built server, several upstream
+features turn out to be **aspirational** rather than working:
+
+### `api_endpoint` in the runtime config is dead
+
+`graphrag-core/src/config/mod.rs:974` declares
+`pub api_endpoint: Option<String>` on `EmbeddingConfig`. The field is:
+- parsed from JSON at line 1720,
+- re-serialized for output at lines 2239–2240,
+- **never read for any other purpose** (`grep -nE 'api_endpoint' src/`
+  shows only those four sites).
+
+`POST /config { embeddings: { backend: "openai", api_endpoint: "..." } }`
+returns 200 with `"GraphRAG initialized successfully with custom
+configuration"`. But the value is silently dropped before any HTTP
+embedding call is made.
+
+### `HttpEmbeddingProvider` is not wired into the runtime pipeline
+
+`graphrag-core/src/embeddings/api_providers.rs` defines
+`HttpEmbeddingProvider` with hardcoded URLs for OpenAI / Voyage / Cohere
+/ Jina / Mistral / Together. **No file under `graphrag-core/src/` (or
+elsewhere in the runtime crates) imports it.** The only references
+outside `api_providers.rs` itself are in the `examples/` tree, which
+isn't compiled into our build (or any normal cargo build).
+
+Concretely: when the pipeline needs an embedding, the code path runs
+through `graphrag-server/src/embeddings.rs::EmbeddingService` which
+matches on `config.backend` against `"hash"` and `"ollama"` only. The
+`"openai"` branch doesn't exist. Setting `backend = "openai"` falls
+through to the hash-based fallback embeddings.
+
+**The 8-backend marketing in upstream README is aspirational; only hash
+and ollama are wired end-to-end.**
+
+### Implication for NPU embeddings
+
+Earlier in this repo we vendored a patch ("expose `endpoint:
+Option<String>` on `EmbeddingConfig` + `with_endpoint` builder") aimed
+at making `HttpEmbeddingProvider` redirectable. Verified empirically
+that the patch is **dead code in the runtime path** because nothing
+constructs `HttpEmbeddingProvider`. The patch is being stripped (see
+`TODO.md` for what replaces it).
+
+The only working route to NPU embeddings is via the `ollama` backend —
+graphrag-server already has it wired through `ollama-rs`. We need an
+**Ollama→OVMS shim** that translates Ollama's `/api/embeddings` request
+shape (`{model, prompt}` → `{embedding}`) to OVMS's OpenAI-compatible
+`/v3/embeddings` (`{model, input}` → `{data:[{embedding}]}`), plus a
+mock `/api/tags` for graphrag-server's `list_local_models` startup
+check. Tracked in `TODO.md`.
+
+### `/api/config` was unreachable due to actix-web scope shadowing
+
+Upstream registered `web::scope("/api/config")` AFTER the apistos
+`scope("/api")`. actix-web matches services in registration order, so
+`/api/config` requests were caught by `/api` first (which has no
+`/config` sub-route) and 404'd. Three things are tangled here:
+
+1. The two scopes can't be nested: `/api` is apistos-typed (requires
+   `PathItemDefinition` on every handler, supplied by `#[api_operation]`),
+   while `/api/config` was plain actix.
+2. Plain actix services can't be registered before apistos's `.build()`.
+3. Reordering to put `/api/config` first hits both of those constraints.
+
+Fix: rename the prefix from `/api/config` to `/config`. No overlap with
+`/api`, no shadowing, block stays plain actix post-`.build()`. All
+config endpoints (`/config[, /default, /template, /validate]`) now
+respond. The home-manager module's `ExecStartPost` POSTs to `/config`
+with the JSON-converted pipeline config.
+
 ## Reality vs. earlier assumptions
 
 After reading upstream source (verified at the pinned commit):

@@ -55,34 +55,62 @@ Tracked work items for `graphrag-rs-nix`. Tick boxes as you go.
 
 ## NPU embeddings
 
-- [x] ~~Path A vs B decision~~ — **Path A revived via vendored patch.**
-      `api_base` literal didn't exist upstream, but
-      `graphrag-core/src/embeddings/api_providers.rs:46` hardcodes the
-      OpenAI URL in a constructor while the underlying `HttpEmbeddingProvider`
-      struct already has an `endpoint: String` field. Patch adds
-      `endpoint: Option<String>` to `EmbeddingConfig` /
-      `EmbeddingProviderConfig` and a `with_endpoint` builder, applied via
-      `prePatch` in `pkgs/graphrag-rs.nix`. With the patch, the `[openai]`
-      backend can be redirected at any OpenAI-spec server (OVMS, vLLM,
-      llama.cpp server) without a shim.
-- [x] ~~Write the Ollama→OVMS shim (Path B)~~ — superseded by the patch.
-      Keep this option in mind only as a fallback if the patch fails to
-      apply against a future upstream rev.
-- [ ] **Test the patch end-to-end against a real OVMS instance.** OVMS up
-      on `:8000/v3/embeddings`, set `services.graphrag-rs.openaiBackend.enable
-      = true`, observe entity extraction + queries hit OVMS in the logs
-      (NPU device load).
-- [ ] **Convert the substituteInPlace block to a real unified-diff `.patch`
-      file** once the patch is verified working. This makes it
-      upstream-PR-ready (`git format-patch` from the built derivation tree).
-      File at `patches/0001-embedding-config-endpoint-override.patch`,
-      consume via `patches = [ ./patches/...patch ];` in
-      `pkgs/graphrag-rs.nix` instead of `prePatch`.
-- [ ] **Send upstream PR** once the patch works. Two-line abstract:
-      "Add `endpoint: Option<String>` to `EmbeddingConfig` /
-      `EmbeddingProviderConfig` to allow OpenAI-spec providers to be
-      pointed at self-hosted OpenAI-compatible servers (vLLM, OVMS,
-      llama.cpp). Existing behavior unchanged when field is `None`."
+- [x] ~~Path A vs B decision~~ → flipped twice. Final answer: **Path B
+      (Ollama→OVMS shim) is the only working route.**
+- [x] ~~Path A via vendored endpoint patch~~ — **dead code, stripped.**
+      Empirical finding 2026-04-28: `HttpEmbeddingProvider` (the struct
+      our patch modified) is **not imported anywhere in the runtime
+      pipeline**. Only graphrag-core/src/embeddings/api_providers.rs
+      itself + examples/ reference it; no `graphrag-server` or
+      `graphrag-core` runtime code constructs it. So even with our
+      `endpoint: Option<String>` field plumbed through, no code path
+      actually uses it for HTTP requests at runtime.
+      See README "Upstream dead-code discovery" section for full details.
+- [x] ~~api_endpoint field in upstream EmbeddingConfig~~ — **also dead
+      code in the runtime path.** `graphrag-core/src/config/mod.rs:974`
+      declares it and serialization round-trips it, but nothing reads
+      its value to construct an HTTP client. `POST /config { backend:
+      "openai", api_endpoint: "..." }` returns 200 but silently falls
+      back to hash embeddings.
+- [ ] **Write the Ollama→OVMS shim** — only working route to NPU
+      embeddings. Spec:
+      - Listen on configurable port (default 11435 to avoid Ollama clash).
+      - `POST /api/embeddings`: accept `{model, prompt}`, translate to
+        OVMS OpenAI-compat `POST /v3/embeddings` body `{model, input}`,
+        unwrap response `data[0].embedding` → `{embedding: [...]}`.
+      - `GET /api/tags`: return synthetic `{models: [{name: "<model>"}]}`
+        so graphrag-server's `Ollama::list_local_models` startup check
+        passes. The model name should match `OLLAMA_EMBEDDING_MODEL`.
+      - ~80 LoC Rust (axum or actix), reqwest for OVMS upstream.
+      - Add as `crates/ollama-ovms-shim/` + `pkgs/ollama-ovms-shim.nix`.
+      - Home-manager module: second systemd-user service for the shim,
+        `OLLAMA_URL` on graphrag-rs unit pointing at `http://127.0.0.1:11435`.
+- [ ] Verify with the shim disabled, just plain Ollama running on neo-16
+      with `nomic-embed-text`, that graphrag-server's existing ollama
+      backend actually fires HTTP requests at it during ingest. This
+      validates that the ollama codepath works at all before we bother
+      with the shim.
+- [ ] **Once shim is in place, test end-to-end on real OVMS.** Verify:
+      ingest a doc, watch shim logs for `/api/embeddings` hits, watch
+      OVMS logs for `/v3/embeddings` and NPU device load.
+
+## Upstream patches needed
+
+- [ ] **Server bind is hardcoded to `0.0.0.0:8080`** in
+      `graphrag-server/src/main.rs:1067`. No env var override. Patch to
+      read `HOST` / `PORT` env vars, default `127.0.0.1:8080`. Vendor via
+      `prePatch`. Until then, `services.graphrag-rs.{host,port}` only
+      affect how clients address the server, and the server is reachable
+      on any interface (firewall externally on multi-user hosts).
+- [ ] **Wire HttpEmbeddingProvider into the runtime pipeline** — upstream
+      ships an 8-backend embedding system (`graphrag-core/src/embeddings/
+      {api_providers,huggingface,ollama}.rs`) but only the `Ollama` and
+      `hash-fallback` paths are connected to graphrag-server's
+      EmbeddingService. The OpenAI / Voyage / Cohere / Jina / Mistral /
+      Together / HuggingFace branches are unreferenced. Big upstream
+      contribution, ~200 LoC across graphrag-core + graphrag-server,
+      out of scope for this flake. Without it, `EmbeddingConfig.api_endpoint`
+      will remain dead code.
 
 ## MCP wrapper
 

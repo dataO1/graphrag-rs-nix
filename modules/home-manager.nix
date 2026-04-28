@@ -250,16 +250,21 @@ in
         (lib.mkIf cfg.applyPipelineConfig {
           ExecStartPost = pkgs.writeShellScript "graphrag-rs-apply-config" ''
             set -eu
-            target="http://${cfg.host}:${toString cfg.port}/api/config"
+            # /config/* (not /api/config/*) — upstream registers /api/config
+            # AFTER /api which shadows it; the flake's vendored patch renames
+            # the prefix to /config to sidestep the conflict.
+            target="http://${cfg.host}:${toString cfg.port}/config"
             for _ in $(seq 1 30); do
               if ${pkgs.curl}/bin/curl -fs "http://${cfg.host}:${toString cfg.port}/health" >/dev/null 2>&1; then
                 break
               fi
               sleep 1
             done
-            ${pkgs.curl}/bin/curl -fsS -X POST "$target" \
-              -H 'Content-Type: application/toml' \
-              --data-binary @${pipelineConfigFile}
+            # set_config takes JSON. Convert our TOML pipeline config first.
+            ${pkgs.remarshal}/bin/toml2json < ${pipelineConfigFile} \
+              | ${pkgs.curl}/bin/curl -fsS -X POST "$target" \
+                  -H 'Content-Type: application/json' \
+                  --data-binary @-
           '';
         })
       ];
