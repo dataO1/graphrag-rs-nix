@@ -4,10 +4,19 @@ Tracked work items for `graphrag-rs-nix`. Tick boxes as you go.
 
 ## Build & packaging
 
-- [ ] First successful `nix build .#graphrag-server`. Will likely surface
-      missing native deps (the upstream pulls qdrant-client/tonic, lancedb,
-      arrow, burn-wgpu transitively). Iterate on `pkgs/graphrag-rs.nix`
-      `nativeBuildInputs` / `buildInputs` until clean.
+- [ ] First successful `nix build .#graphrag-server`. Currently failing on
+      `qdrant-client v1.15.0`'s build.rs which writes generated test
+      snippets back into its own (read-only) vendored crate dir. Worked
+      around by `--no-default-features` (drops qdrant-client; server runs
+      in in-memory storage fallback). Iterate on `pkgs/graphrag-rs.nix`
+      until the workaround sticks; surface other missing native deps as
+      they appear.
+- [ ] **Re-enable Qdrant**: patch qdrant-client's build.rs so the
+      snippet-generation path is a no-op when the source dir isn't
+      writable, OR pin qdrant-client back to 1.11.x via a `[patch]` block
+      and check whether 1.11 has the same issue. Then drop the
+      `--no-default-features` workaround. Without this, embedding vectors
+      live in-memory and reset on every server restart.
 - [ ] First successful `nix build .#graphrag-mcp`.
 - [ ] Add `nix flake check` (with build) to a CI workflow once builds pass.
 - [ ] Decide whether to expose `graphrag-cli` separately or drop it (it's

@@ -22,7 +22,12 @@ let
     PROTOC = "${protobuf}/bin/protoc";
     OPENSSL_NO_VENDOR = "1";
 
-    cargoExtraArgs = "--locked -p graphrag-server -p graphrag-cli";
+    # --no-default-features drops qdrant-client (default feature of
+    # graphrag-server). qdrant-client v1.15.0's build.rs writes into its own
+    # crate source dir which is read-only in Nix's sandbox; until we patch
+    # that build script, run graphrag-server in its in-memory fallback mode.
+    # Tracked in TODO.md "Build & packaging".
+    cargoExtraArgs = "--locked --no-default-features -p graphrag-server -p graphrag-cli";
 
     doCheck = false;
 

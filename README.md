@@ -66,6 +66,15 @@ The MCP wrapper is installed on `PATH` and a sample MCP-client config is
 rendered to `$XDG_CONFIG_HOME/graphrag-rs/mcp.json` for symlinking into Claude
 Code / opencode / crush.
 
+## Known build limitations
+
+- **No Qdrant** in the current build. `qdrant-client v1.15.0`'s build.rs
+  panics in the Nix sandbox (writes test snippets into its read-only
+  vendored source). Worked around by building graphrag-server with
+  `--no-default-features`, which drops the qdrant-client dependency and
+  runs the server in its in-memory storage fallback. Vectors and graph
+  state reset on every restart. Re-enabling Qdrant tracked in `TODO.md`.
+
 ## Reality vs. earlier assumptions
 
 After reading upstream source (verified at the pinned commit):
