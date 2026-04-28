@@ -27,7 +27,7 @@ impl Config {
     fn from_env() -> Self {
         Self {
             base_url: env::var("GRAPHRAG_BASE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:8910".to_string()),
+                .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string()),
             timeout_secs: env::var("GRAPHRAG_TIMEOUT_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())

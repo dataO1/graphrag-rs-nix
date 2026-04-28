@@ -15,32 +15,47 @@ Tracked work items for `graphrag-rs-nix`. Tick boxes as you go.
 
 ## Upstream API verification
 
-- [ ] Verify `--config <path>` is the correct flag for `graphrag-server`.
-      Currently assumed in `modules/home-manager.nix` ExecStart; check
-      `graphrag-server --help` after first build.
-- [ ] Confirm REST scope. Wrapper currently targets `/api/{query,documents,
-      graph/stats,graph/build}` based on a read of upstream `graphrag-server/
-      src/main.rs` at the pinned commit. Re-verify after first run with
-      `curl localhost:8910/api/query -d '...'`.
-- [ ] Confirm TOML schema. `modules/home-manager.nix` renders sections
-      `[server]`, `[embeddings]`, `[llm]`, `[storage]`, `[ingest]` — this is
-      a best-guess from workspace deps and the README. Cross-check against
-      `config/templates/*.toml` and `graphrag-core/src/config*.rs` post-build
-      and adjust option names where they diverge.
+- [x] ~~Verify `--config <path>` flag~~ — **doesn't exist**. graphrag-server
+      is env-var driven at startup. Module updated to set
+      `EMBEDDING_BACKEND` / `EMBEDDING_DIM` / `OLLAMA_URL` /
+      `OLLAMA_EMBEDDING_MODEL` / `QDRANT_URL` / `COLLECTION_NAME` instead.
+- [x] ~~Confirm TOML schema~~ — the elaborate `[mode]/[general]/[hybrid.*]`
+      schema is the **runtime pipeline config**, POSTed to `/api/config`
+      after startup. Module now exposes `pipelineConfig` (nullable
+      `tomlFormat.type`) and an opt-in `ExecStartPost` that curls it once
+      `/health` is responsive.
+- [ ] Confirm REST endpoints under `/api/*` are still correct after the
+      first successful build by hitting them with curl. Spot-check return
+      shapes against what `graphrag-mcp` assumes.
+
+## Upstream patches needed
+
+- [ ] **Server bind is hardcoded to `0.0.0.0:8080`** in
+      `graphrag-server/src/main.rs:1067`. No env var override. Options:
+      patch upstream to read `HOST` / `PORT`, vendor a small overlay, or
+      run nginx in front and let everyone bind localhost. Until then,
+      `services.graphrag-rs.{host,port}` only affect how clients address
+      the server, not what it binds to.
+- [ ] Server binds publicly (`0.0.0.0`) — for a per-user systemd unit on a
+      laptop this is wrong. Bind-address override is the right fix; in the
+      meantime the home-manager module should consider firewall guidance
+      or socket activation.
 
 ## NPU embeddings
 
-- [ ] Decide between two paths to get OVMS-on-NPU embeddings:
-  - **Path A**: verify graphrag-rs's `[openai]` backend honors `api_base`
-    (grep `graphrag-core` for the OpenAI embedding client). If yes, switch
-    `services.graphrag-rs.embeddings.backend = "openai"` and point at OVMS
-    `/v3/embeddings` directly.
-  - **Path B**: write a ~50 LoC Ollama→OVMS shim translating Ollama's
-    `/api/embeddings` request format to OVMS `/v3/embeddings`. Add it as a
-    second package in this flake (`pkgs/ollama-ovms-shim.nix`) and a second
-    systemd user service in the home-manager module.
-- [ ] If Path A: open an upstream PR for `[openai] api_base` if not already
-      supported.
+- [x] ~~Path A vs B decision~~ — **Path A is dead.** `api_base` literal
+      appears 0 times across the entire repo (verified via authenticated
+      GitHub code search). graphrag-server's startup `EmbeddingConfig`
+      (`graphrag-server/src/embeddings.rs`) only has `ollama_url` /
+      `ollama_model` for HTTP-backed embeddings. No way to point the
+      OpenAI backend at OVMS without patching.
+- [ ] **Write the Ollama→OVMS shim** (Path B). ~50–100 LoC: a HTTP server
+      that accepts Ollama's `/api/embeddings` request shape
+      (`{model, prompt}` or `{model, input}`) and proxies to OVMS's
+      `/v3/embeddings` (OpenAI-compat: `{model, input}` → embeddings array).
+      Add as `pkgs/ollama-ovms-shim.nix` + a `crates/ollama-ovms-shim/`
+      crate, plus a second systemd user service in the module. Then point
+      `services.graphrag-rs.embedding.ollama.url` at the shim's port.
 
 ## MCP wrapper
 

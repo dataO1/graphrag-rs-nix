@@ -36,21 +36,24 @@ imports = [ inputs.graphrag-rs.homeManagerModules.default ];
 
 services.graphrag-rs = {
   enable = true;
-  sources = [ "/home/data01/Notes" ];
 
-  embeddings = {
+  embedding = {
     backend = "ollama";              # see embedding-backend caveat below
-    model = "Qwen3-Embedding-0.6B";
+    dimension = 768;
     ollama = {
-      host = "http://127.0.0.1";
-      port = 8000;                   # OVMS, fronted by an Ollama→OVMS shim
+      url = "http://127.0.0.1:11434"; # TODO: point at the Ollama→OVMS shim
+      model = "nomic-embed-text";
     };
   };
 
-  llm = {
-    backend = "ollama";
-    model = "llama3.1:8b";
+  qdrant = {
+    url = "http://127.0.0.1:6334";
+    collection = "graphrag";
   };
+
+  # Optional: full pipeline config POSTed to /api/config on startup.
+  # Schema: [mode] / [general] / [hybrid.*] etc. Set null to skip.
+  pipelineConfig = null;
 };
 ```
 
@@ -58,14 +61,25 @@ The MCP wrapper is installed on `PATH` and a sample MCP-client config is
 rendered to `$XDG_CONFIG_HOME/graphrag-rs/mcp.json` for symlinking into Claude
 Code / opencode / crush.
 
-## Embedding backend caveat
+## Reality vs. earlier assumptions
 
-graphrag-rs's `[ollama]` block has explicit `host`/`port`; the `[openai]`
-backend's `api_base` support is currently **unverified** in source. The
-default config uses the Ollama backend pointed at a (TODO) Ollama→OVMS shim
-that translates Ollama's `/api/embeddings` request format to OVMS's
-OpenAI-compatible `/v3/embeddings`. Switch to the `openai` backend once
-upstream `api_base` support is confirmed.
+After reading upstream source (verified at the pinned commit):
+
+- **`graphrag-server` is env-var driven at startup**, not file-driven. There is
+  no `--config` CLI flag. Vars: `EMBEDDING_BACKEND`, `EMBEDDING_DIM`,
+  `OLLAMA_URL`, `OLLAMA_EMBEDDING_MODEL`, `QDRANT_URL`, `COLLECTION_NAME`,
+  `JWT_SECRET`. The home-manager module sets these.
+- **Bind is hardcoded to `0.0.0.0:8080`** (`graphrag-server/src/main.rs:1067`).
+  `services.graphrag-rs.{host,port}` only control how clients address the
+  server, not what it binds to. Patch upstream if you need flexibility.
+- **The elaborate `[mode] / [general] / [hybrid.*]` TOML schema is the
+  runtime pipeline config**, uploaded via `POST /api/config` after the
+  server is up. Set `services.graphrag-rs.pipelineConfig` and an
+  `ExecStartPost` will POST it for you (curl with retry).
+- **`api_base` is not a thing in upstream** — there is no way to point the
+  `[openai]` backend at OVMS directly. NPU embeddings require a tiny
+  Ollama→OVMS shim translating Ollama's `/api/embeddings` request format
+  to OVMS's OpenAI-compat `/v3/embeddings` (still TODO).
 
 ## Pinning
 

@@ -8,45 +8,22 @@ let
 
   tomlFormat = pkgs.formats.toml { };
 
-  # Render the merged config from typed Nix options. extraConfig wins over
-  # any computed defaults so users can drop in arbitrary keys (e.g. retrieval
-  # strategy tweaks, reranker config) without us having to model them all.
-  computedConfig = lib.recursiveUpdate
-    {
-      server = {
-        host = cfg.host;
-        port = cfg.port;
-      };
-      embeddings = lib.filterAttrs (_: v: v != null) {
-        backend = cfg.embeddings.backend;
-        model = cfg.embeddings.model;
-        dimension = cfg.embeddings.dimension;
-        batch_size = cfg.embeddings.batchSize;
-      } // lib.optionalAttrs (cfg.embeddings.backend == "ollama") {
-        host = cfg.embeddings.ollama.host;
-        port = cfg.embeddings.ollama.port;
-      } // lib.optionalAttrs (cfg.embeddings.backend == "openai") {
-        api_base = cfg.embeddings.openai.apiBase;
-      };
-      llm = lib.filterAttrs (_: v: v != null) {
-        backend = cfg.llm.backend;
-        model = cfg.llm.model;
-        temperature = cfg.llm.temperature;
-      } // lib.optionalAttrs (cfg.llm.backend == "ollama") {
-        host = cfg.llm.ollama.host;
-        port = cfg.llm.ollama.port;
-      };
-      storage = {
-        backend = cfg.storage.backend;
-        path = cfg.dataDir;
-      };
-      ingest = {
-        sources = cfg.sources;
-      };
-    }
-    cfg.extraConfig;
+  # Pipeline config (POSTed to /api/config at runtime, optional). This is
+  # the [mode]/[general]/[hybrid.*]/[semantic.*]/[algorithmic.*] schema.
+  # The binary itself doesn't read it on startup — env vars do that.
+  pipelineConfigFile =
+    if cfg.pipelineConfig == null then null
+    else tomlFormat.generate "graphrag-rs-pipeline.toml" cfg.pipelineConfig;
 
-  configFile = tomlFormat.generate "graphrag-rs.toml" computedConfig;
+  envVars = {
+    EMBEDDING_BACKEND = cfg.embedding.backend;
+    EMBEDDING_DIM = toString cfg.embedding.dimension;
+    OLLAMA_URL = cfg.embedding.ollama.url;
+    OLLAMA_EMBEDDING_MODEL = cfg.embedding.ollama.model;
+    QDRANT_URL = cfg.qdrant.url;
+    COLLECTION_NAME = cfg.qdrant.collection;
+    RUST_LOG = cfg.logLevel;
+  } // cfg.environment;
 
   mcpClientConfig = pkgs.writeText "graphrag-mcp.json" (builtins.toJSON {
     mcpServers.graphrag = {
@@ -74,10 +51,7 @@ in
       type = lib.types.package;
       default = flakePkgs.graphrag-mcp;
       defaultText = "graphrag-rs flake's graphrag-mcp output";
-      description = ''
-        Stdio MCP wrapper that proxies tool calls to the REST server. Installed
-        on PATH so MCP clients (Claude Code, opencode, crush) can spawn it.
-      '';
+      description = "Stdio MCP wrapper proxying tool calls to the REST server.";
     };
 
     installMcp = lib.mkOption {
@@ -89,122 +63,112 @@ in
     host = lib.mkOption {
       type = lib.types.str;
       default = "127.0.0.1";
-      description = "REST API bind address. Default localhost-only.";
+      description = ''
+        Address used by the MCP wrapper and `mcp.json` to reach the REST server.
+
+        NOTE: Upstream graphrag-server hardcodes its bind to "0.0.0.0:8080" in
+        graphrag-server/src/main.rs — this option does NOT change what the server
+        binds to. It only controls how clients address it. Patch upstream if you
+        need real host/port flexibility.
+      '';
     };
 
     port = lib.mkOption {
       type = lib.types.port;
-      default = 8910;
-      description = "REST API port. graphrag-server upstream default is 8080; we shift it.";
+      default = 8080;
+      description = ''
+        Port the MCP wrapper / mcp.json target. Hardcoded upstream: 8080.
+        See `host` for the same caveat.
+      '';
     };
 
-    dataDir = lib.mkOption {
-      type = lib.types.str;
-      default = "${config.xdg.dataHome}/graphrag-rs";
-      defaultText = "\${config.xdg.dataHome}/graphrag-rs";
-      description = "Where graphrag-rs stores its graph + cache state.";
-    };
-
-    sources = lib.mkOption {
-      type = lib.types.listOf lib.types.str;
-      default = [ ];
-      example = [ "/home/alice/Notes" ];
-      description = "Directories to ingest into the graph (markdown/text).";
-    };
-
-    embeddings = {
+    embedding = {
       backend = lib.mkOption {
-        type = lib.types.enum [ "huggingface" "ollama" "openai" "voyage" "cohere" "jina" "mistral" "together" ];
+        type = lib.types.enum [ "hash" "ollama" "huggingface" "openai" ];
         default = "ollama";
         description = ''
-          Embedding backend. Default "ollama" because graphrag-rs's Ollama
-          backend exposes host/port — easiest path to reach a local OVMS
-          OpenAI-compat endpoint via a thin shim. Switch to "openai" if/when
-          graphrag-rs's OpenAI backend is verified to honor `api_base`.
+          Startup embedding backend (env var EMBEDDING_BACKEND). graphrag-server
+          starts with this; the full pipeline config can be POSTed later via
+          `services.graphrag-rs.pipelineConfig`.
+
+          "hash" = deterministic hash-based embeddings (no model, no NPU).
+          "ollama" = HTTP to OLLAMA_URL/api/embeddings (use this for OVMS-via-shim).
         '';
       };
 
-      model = lib.mkOption {
-        type = lib.types.str;
-        default = "nomic-embed-text";
-        description = "Embedding model identifier (backend-specific).";
-      };
-
       dimension = lib.mkOption {
-        type = lib.types.nullOr lib.types.int;
-        default = null;
-        description = "Embedding vector dimension. Null = use backend default.";
-      };
-
-      batchSize = lib.mkOption {
         type = lib.types.int;
-        default = 32;
+        default = 768;
+        description = "Embedding vector dimension (env var EMBEDDING_DIM). 768 = nomic-embed-text default.";
       };
 
       ollama = {
-        host = lib.mkOption {
+        url = lib.mkOption {
           type = lib.types.str;
-          default = "http://localhost";
-          description = "Ollama-protocol host (point at OVMS shim or real Ollama).";
-        };
-        port = lib.mkOption {
-          type = lib.types.port;
-          default = 11434;
-        };
-      };
-
-      openai = {
-        apiBase = lib.mkOption {
-          type = lib.types.str;
-          default = "http://127.0.0.1:8000/v3";
+          default = "http://localhost:11434";
           description = ''
-            OpenAI-compatible API base. For OVMS this is `http://host:port/v3`.
-            graphrag-rs's `[openai] api_base` support is unverified — leave on
-            "ollama" backend until confirmed.
+            Base URL for the Ollama-protocol embeddings endpoint (env var
+            OLLAMA_URL). Point this at the (TODO) Ollama→OVMS shim once written
+            to get NPU-backed embeddings via OVMS's OpenAI-compat /v3/embeddings.
           '';
         };
-      };
-    };
-
-    llm = {
-      backend = lib.mkOption {
-        type = lib.types.enum [ "ollama" "openai" "candle" "mock" ];
-        default = "ollama";
-      };
-      model = lib.mkOption {
-        type = lib.types.str;
-        default = "llama3.1:8b";
-      };
-      temperature = lib.mkOption {
-        type = lib.types.float;
-        default = 0.2;
-      };
-      ollama = {
-        host = lib.mkOption {
+        model = lib.mkOption {
           type = lib.types.str;
-          default = "http://localhost";
-        };
-        port = lib.mkOption {
-          type = lib.types.port;
-          default = 11434;
+          default = "nomic-embed-text";
+          description = "Embedding model name (env var OLLAMA_EMBEDDING_MODEL).";
         };
       };
     };
 
-    storage = {
-      backend = lib.mkOption {
-        type = lib.types.enum [ "qdrant" "lancedb" "memory" ];
-        default = "qdrant";
+    qdrant = {
+      url = lib.mkOption {
+        type = lib.types.str;
+        default = "http://localhost:6334";
+        description = "Qdrant gRPC endpoint (env var QDRANT_URL). Falls back to in-memory if unreachable.";
+      };
+      collection = lib.mkOption {
+        type = lib.types.str;
+        default = "graphrag";
+        description = "Qdrant collection name (env var COLLECTION_NAME).";
       };
     };
 
-    extraConfig = lib.mkOption {
-      type = tomlFormat.type;
-      default = { };
+    pipelineConfig = lib.mkOption {
+      type = lib.types.nullOr tomlFormat.type;
+      default = null;
+      example = lib.literalExpression ''
+        {
+          mode.approach = "hybrid";
+          general = {
+            output_dir = "./output/hybrid";
+            log_level = "info";
+            max_threads = 4;
+          };
+          hybrid = {
+            embeddings = { primary_backend = "huggingface"; primary_model = "BAAI/bge-large-en-v1.5"; };
+            entity_extraction = { llm_model = "llama3.1:8b"; };
+            retrieval = { fusion_strategy = "rrf"; top_k = 10; };
+          };
+        }
+      '';
       description = ''
-        Extra TOML keys merged on top of the generated config. Use this for
-        anything not modeled as a typed option (retrieval strategy, reranker,
-        community detection params, etc).
+        Optional pipeline config rendered to TOML and POSTed to /api/config
+        after the server starts. Schema: [mode], [general], [hybrid.*]
+        (or [semantic.*] / [algorithmic.*]), per upstream
+        config/templates/*.toml.
+
+        Set null to skip — server runs with env-var defaults only.
+      '';
+    };
+
+    applyPipelineConfig = lib.mkOption {
+      type = lib.types.bool;
+      default = cfg.pipelineConfig != null;
+      defaultText = "true if pipelineConfig is set";
+      description = ''
+        Run a oneshot ExecStartPost that POSTs `pipelineConfig` to
+        /api/config once the server is up. Disable to manage the config
+        yourself (e.g. via the Swagger UI at /swagger).
       '';
     };
 
@@ -224,12 +188,10 @@ in
   config = lib.mkIf cfg.enable {
     home.packages = lib.mkIf cfg.installMcp [ cfg.mcpPackage ];
 
-    # Drop the MCP client config in a known place so the user can symlink it
-    # into ~/.config/{claude,opencode,crush}/mcp.json, or `cat` it for
-    # reference. We deliberately don't write directly into those files —
-    # those are managed elsewhere in this dotfiles tree.
     xdg.configFile."graphrag-rs/mcp.json".source = mcpClientConfig;
-    xdg.configFile."graphrag-rs/config.toml".source = configFile;
+    xdg.configFile."graphrag-rs/pipeline.toml" = lib.mkIf (pipelineConfigFile != null) {
+      source = pipelineConfigFile;
+    };
 
     systemd.user.services.graphrag-rs = {
       Unit = {
@@ -238,16 +200,30 @@ in
         Wants = [ "network-online.target" ];
       };
 
-      Service = {
-        ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${cfg.dataDir}";
-        ExecStart = "${cfg.package}/bin/graphrag-server --config ${configFile}";
-        Restart = "on-failure";
-        RestartSec = "5s";
-        Environment = lib.mapAttrsToList (k: v: "${k}=${v}") ({
-          RUST_LOG = cfg.logLevel;
-          GRAPHRAG_DATA_DIR = cfg.dataDir;
-        } // cfg.environment);
-      };
+      Service = lib.mkMerge [
+        {
+          ExecStart = "${cfg.package}/bin/graphrag-server";
+          Restart = "on-failure";
+          RestartSec = "5s";
+          Environment = lib.mapAttrsToList (k: v: "${k}=${v}") envVars;
+        }
+        (lib.mkIf cfg.applyPipelineConfig {
+          ExecStartPost = pkgs.writeShellScript "graphrag-rs-apply-config" ''
+            set -eu
+            target="http://${cfg.host}:${toString cfg.port}/api/config"
+            # Wait for the server to come up (up to 30s).
+            for _ in $(seq 1 30); do
+              if ${pkgs.curl}/bin/curl -fs "http://${cfg.host}:${toString cfg.port}/health" >/dev/null 2>&1; then
+                break
+              fi
+              sleep 1
+            done
+            ${pkgs.curl}/bin/curl -fsS -X POST "$target" \
+              -H 'Content-Type: application/toml' \
+              --data-binary @${pipelineConfigFile}
+          '';
+        })
+      ];
 
       Install = {
         WantedBy = [ "default.target" ];
