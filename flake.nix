@@ -26,6 +26,13 @@
     {
       homeManagerModules.default = import ./modules/home-manager.nix { inherit self; };
       homeManagerModules.graphrag-rs = self.homeManagerModules.default;
+
+      # System-level NPU embedding service: OVMS container + static-shape
+      # model build oneshot. Pair with the home-manager module to point
+      # graphrag-server at it (or hit /v3/embeddings directly from any
+      # OpenAI-compatible client).
+      nixosModules.default = import ./modules/nixos.nix { inherit self; };
+      nixosModules.graphrag-rs-npu = self.nixosModules.default;
     }
     // flake-utils.lib.eachSystem systems (system:
       let

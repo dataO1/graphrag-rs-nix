@@ -19,6 +19,7 @@ let
     EMBEDDING_BACKEND = cfg.embedding.backend;
     EMBEDDING_DIM = toString cfg.embedding.dimension;
     OLLAMA_URL = cfg.embedding.ollama.url;
+    OLLAMA_PORT = toString cfg.embedding.ollama.port;
     OLLAMA_EMBEDDING_MODEL = cfg.embedding.ollama.model;
     QDRANT_URL = cfg.qdrant.url;
     COLLECTION_NAME = cfg.qdrant.collection;
@@ -104,11 +105,22 @@ in
       ollama = {
         url = lib.mkOption {
           type = lib.types.str;
-          default = "http://localhost:11434";
+          default = "http://localhost";
           description = ''
-            OLLAMA_URL env var. Set to a real Ollama instance for now;
-            once the Ollama→OVMS shim ships in this flake, point it
-            there for NPU-backed embeddings.
+            Host for Ollama (env var OLLAMA_URL). Just the scheme+host —
+            port is configured separately via `port` below. Point at a
+            real Ollama instance, or once the Ollama→OVMS shim lands in
+            this flake, point at that for NPU-backed embeddings.
+          '';
+        };
+        port = lib.mkOption {
+          type = lib.types.port;
+          default = 11434;
+          description = ''
+            Port for Ollama (env var OLLAMA_PORT — relies on the vendored
+            patch in `pkgs/graphrag-rs.nix` since upstream hardcodes 11434).
+            11434 = real Ollama default. The future Ollama→OVMS shim
+            should run on a different port to coexist with real Ollama.
           '';
         };
         model = lib.mkOption {

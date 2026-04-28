@@ -15,8 +15,27 @@ proxies tool calls to the REST server so any MCP client can drive it.
 ├── crates/
 │   └── graphrag-mcp/          ~250 LoC stdio JSON-RPC → REST proxy
 └── modules/
-    └── home-manager.nix       services.graphrag-rs systemd-user unit
+    ├── home-manager.nix       services.graphrag-rs (user) — graphrag-server
+    └── nixos.nix              services.graphrag-rs-npu (system) — OVMS + NPU
 ```
+
+## Architecture
+
+Two-module split:
+
+- **`services.graphrag-rs-npu`** (NixOS system) — provides NPU-backed
+  embeddings via OpenVINO Model Server. Builds a static-shape embedding
+  model on first boot (rootful podman + optimum-cli + openvino-tokenizers
+  + Mediapipe graph), then serves on `127.0.0.1:8000/v3/embeddings`
+  (OpenAI-compatible). Distilled from the in-house `mneme` flake. Self-
+  contained; doesn't depend on mneme.
+
+- **`services.graphrag-rs`** (home-manager user) — runs `graphrag-server`
+  as a systemd-user unit. Talks to a Qdrant instance for vector storage
+  and to an Ollama-protocol embedding endpoint. The Ollama→OVMS shim
+  bridging the two is TODO; until it lands, point `embedding.ollama.{url,
+  port,model}` at a real Ollama instance for CPU/GPU embeddings as a
+  bootstrapping smoke test.
 
 ## Usage
 
@@ -34,6 +53,16 @@ Then in your home-manager module:
 ```nix
 imports = [ inputs.graphrag-rs.homeManagerModules.default ];
 
+# NixOS configuration (system)
+services.graphrag-rs-npu = {
+  enable = true;
+  embeddingModel = "mixedbread-ai/mxbai-embed-large-v1";   # 1024-dim, 512 ctx
+  embeddingMaxSeqLen = 512;
+  embeddingPooling = "CLS";
+  embeddingDevice = "NPU";
+};
+
+# home-manager configuration (user)
 services.graphrag-rs = {
   enable = true;
 
@@ -42,9 +71,10 @@ services.graphrag-rs = {
   # pointed at an Ollama→OVMS shim (TODO).
   embedding = {
     backend = "ollama";
-    dimension = 768;
+    dimension = 768;                        # MUST match what the model returns
     ollama = {
-      url = "http://127.0.0.1:11434";       # real Ollama for now
+      url = "http://127.0.0.1";
+      port = 11434;                         # real Ollama; switch to shim port later
       model = "nomic-embed-text";
     };
   };

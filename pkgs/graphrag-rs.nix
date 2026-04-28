@@ -40,6 +40,47 @@ let
   # "Upstream dead-code discovery" section. The path to NPU embeddings
   # is via the ollama backend pointed at an Ollama→OVMS shim (TODO.md).
   sourcePatchScript = ''
+    # Add OLLAMA_PORT env var support to graphrag-server's startup config.
+    # Upstream hardcodes `Ollama::new(config.ollama_url.clone(), 11434)` —
+    # makes it impossible to point graphrag-server at an Ollama-protocol
+    # server on any other port (real Ollama on 11434 + our future
+    # Ollama→OVMS shim on a different port can't both coexist otherwise).
+    substituteInPlace graphrag-server/src/main.rs \
+      --replace-fail \
+            "ollama_model: std::env::var(\"OLLAMA_EMBEDDING_MODEL\")
+                .unwrap_or_else(|_| \"nomic-embed-text\".to_string())," \
+            "ollama_model: std::env::var(\"OLLAMA_EMBEDDING_MODEL\")
+                .unwrap_or_else(|_| \"nomic-embed-text\".to_string()),
+            ollama_port: std::env::var(\"OLLAMA_PORT\")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(11434),"
+
+    substituteInPlace graphrag-server/src/embeddings.rs \
+      --replace-fail \
+        "    pub ollama_url: String,
+" \
+        "    pub ollama_url: String,
+    pub ollama_port: u16,
+"
+
+    substituteInPlace graphrag-server/src/embeddings.rs \
+      --replace-fail \
+        "let ollama = Ollama::new(config.ollama_url.clone(), 11434);" \
+        "let ollama = Ollama::new(config.ollama_url.clone(), config.ollama_port);"
+
+    substituteInPlace graphrag-server/src/embeddings.rs \
+      --replace-fail \
+        "            backend: \"hash\".to_string()," \
+        "            backend: \"hash\".to_string(),
+            ollama_port: 11434,"
+
+    substituteInPlace graphrag-server/src/embeddings.rs \
+      --replace-fail \
+        "            backend: \"ollama\".to_string()," \
+        "            backend: \"ollama\".to_string(),
+            ollama_port: 11434,"
+
     # Fix actix-web scope shadowing: upstream registers `web::scope("/api/config")`
     # AFTER the apistos `scope("/api")` and AFTER `.build()`, so /api/config
     # requests are caught by the broader /api scope first (which has no /config

@@ -72,19 +72,30 @@ Tracked work items for `graphrag-rs-nix`. Tick boxes as you go.
       its value to construct an HTTP client. `POST /config { backend:
       "openai", api_endpoint: "..." }` returns 200 but silently falls
       back to hash embeddings.
+- [x] ~~Distill OVMS into this flake~~ — done. `modules/nixos.nix`
+      ships a `services.graphrag-rs-npu` system module that brings up
+      OVMS + the static-shape model build oneshot. No more dependency
+      on the in-house `mneme` flake.
+- [x] ~~Add OLLAMA_PORT env var support to graphrag-server~~ — done via
+      `prePatch` in `pkgs/graphrag-rs.nix`. Lets graphrag-server target
+      either real Ollama on 11434 or our future shim on a different port
+      without conflict.
 - [ ] **Write the Ollama→OVMS shim** — only working route to NPU
-      embeddings. Spec:
+      embeddings (since upstream's HttpEmbeddingProvider isn't wired into
+      the runtime pipeline). Spec:
       - Listen on configurable port (default 11435 to avoid Ollama clash).
       - `POST /api/embeddings`: accept `{model, prompt}`, translate to
         OVMS OpenAI-compat `POST /v3/embeddings` body `{model, input}`,
         unwrap response `data[0].embedding` → `{embedding: [...]}`.
+        Forward `model` field as-is or remap to `"embeddings"` (which is
+        what mediapipe's graph name is per `modules/nixos.nix`).
       - `GET /api/tags`: return synthetic `{models: [{name: "<model>"}]}`
         so graphrag-server's `Ollama::list_local_models` startup check
-        passes. The model name should match `OLLAMA_EMBEDDING_MODEL`.
-      - ~80 LoC Rust (axum or actix), reqwest for OVMS upstream.
+        passes. Model name must match `OLLAMA_EMBEDDING_MODEL`.
+      - ~80 LoC Rust (axum + reqwest).
       - Add as `crates/ollama-ovms-shim/` + `pkgs/ollama-ovms-shim.nix`.
-      - Home-manager module: second systemd-user service for the shim,
-        `OLLAMA_URL` on graphrag-rs unit pointing at `http://127.0.0.1:11435`.
+      - Wire into `modules/nixos.nix` as a second systemd service
+        alongside the OVMS container.
 - [ ] Verify with the shim disabled, just plain Ollama running on neo-16
       with `nomic-embed-text`, that graphrag-server's existing ollama
       backend actually fires HTTP requests at it during ingest. This
