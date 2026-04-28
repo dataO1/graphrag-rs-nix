@@ -74,15 +74,10 @@ rev there to update.
 
 ## TODO
 
-- [ ] First successful `nix build .#graphrag-server` (will likely surface
-      missing native deps; iterate on `pkgs/graphrag-rs.nix`).
-- [ ] Verify `--config <path>` is the correct CLI flag for `graphrag-server`
-      (currently assumed; check `graphrag-server --help`).
-- [ ] Confirm graphrag-rs's TOML schema matches what `home-manager.nix`
-      renders (sections: `[server]`, `[embeddings]`, `[llm]`, `[storage]`,
-      `[ingest]`). Adjust if upstream uses different keys.
-- [ ] Write the Ollama→OVMS shim (~50 LoC) or verify `[openai] api_base`
-      and switch backend.
-- [ ] Add a NixOS module variant for system-wide deployment (mneme-style),
-      if needed later.
-- [ ] Add `nix flake check` CI.
+See [TODO.md](./TODO.md).
+
+## Development
+
+This repo ships a `.envrc` for `nix-direnv`. Run `direnv allow` once and the
+flake's `devShell` (rust toolchain, formatter, language server) loads on
+`cd`.
