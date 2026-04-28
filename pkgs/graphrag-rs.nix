@@ -124,7 +124,10 @@ let
     PROTOC = "${protobuf}/bin/protoc";
     OPENSSL_NO_VENDOR = "1";
 
-    cargoExtraArgs = "--locked -p graphrag-server -p graphrag-cli";
+    # `--features ollama` enables ollama-rs in graphrag-server; without it
+    # the ollama backend's logic is conditionally compiled out and the
+    # server logs "Ollama support not compiled in. Using fallback embeddings."
+    cargoExtraArgs = "--locked -p graphrag-server -p graphrag-cli --features graphrag-server/ollama";
 
     doCheck = false;
 
