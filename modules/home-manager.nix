@@ -6,32 +6,14 @@ let
   system = pkgs.stdenv.hostPlatform.system;
   flakePkgs = self.packages.${system};
 
-  tomlFormat = pkgs.formats.toml { };
-
-  # When openaiBackend.enable is true, synthesize a minimal pipeline config
-  # that points the [embeddings] section at the user's OpenAI-compatible
-  # server (e.g. OVMS /v3/embeddings). The patched graphrag-core honors the
-  # `endpoint` field so this gets routed correctly.
-  openaiPipelineConfig = lib.optionalAttrs cfg.openaiBackend.enable {
-    embeddings = {
-      provider = "openai";
-      model = cfg.openaiBackend.model;
-      api_key = cfg.openaiBackend.apiKey;
-      endpoint = cfg.openaiBackend.apiBase;
-      batch_size = cfg.openaiBackend.batchSize;
-    } // lib.optionalAttrs (cfg.openaiBackend.dimensions != null) {
-      dimensions = cfg.openaiBackend.dimensions;
-    };
-  };
-
-  effectivePipelineConfig =
-    if cfg.pipelineConfig != null then cfg.pipelineConfig
-    else if cfg.openaiBackend.enable then openaiPipelineConfig
-    else null;
-
+  # Pipeline config (POSTed to /config — note: prefix is /config, not
+  # /api/config; see the actix scope-shadowing fix in pkgs/graphrag-rs.nix).
+  # Schema is the upstream runtime config (graphrag-core::config::Config),
+  # which is JSON-shaped (not TOML). Set null to skip — server runs with
+  # env-var defaults only.
   pipelineConfigFile =
-    if effectivePipelineConfig == null then null
-    else tomlFormat.generate "graphrag-rs-pipeline.toml" effectivePipelineConfig;
+    if cfg.pipelineConfig == null then null
+    else (pkgs.formats.json { }).generate "graphrag-rs-pipeline.json" cfg.pipelineConfig;
 
   envVars = {
     EMBEDDING_BACKEND = cfg.embedding.backend;
@@ -96,88 +78,44 @@ in
 
     # ---------- Startup embedding backend (env-var driven) ----------
     # graphrag-server's startup EmbeddingService only recognizes "hash" or
-    # "ollama" (graphrag-server/src/embeddings.rs). The patched OpenAI path
-    # only kicks in once a pipeline config is POSTed — see openaiBackend
-    # below. Leave this as "hash" if you're using openaiBackend.
+    # "ollama" (graphrag-server/src/embeddings.rs). Upstream's "openai" /
+    # "voyage" / etc. config branches are not actually wired into the
+    # runtime pipeline — they parse and validate but silently fall back
+    # to hash. NPU embeddings work via "ollama" pointed at an
+    # Ollama→OVMS shim (TODO.md).
     embedding = {
       backend = lib.mkOption {
         type = lib.types.enum [ "hash" "ollama" ];
         default = "hash";
         description = ''
-          STARTUP backend (env var EMBEDDING_BACKEND). Upstream graphrag-server
-          only supports "hash" (deterministic, no model) or "ollama" (HTTP to
-          OLLAMA_URL/api/embeddings) at startup. The full OpenAI path requires
-          a pipeline config POST — set `services.graphrag-rs.openaiBackend`
-          for that.
+          Embedding backend (env var EMBEDDING_BACKEND). Upstream
+          graphrag-server only wires "hash" (deterministic, no model) and
+          "ollama" (HTTP to OLLAMA_URL/api/embeddings) end-to-end. Setting
+          other values silently falls back to hash.
         '';
       };
 
       dimension = lib.mkOption {
         type = lib.types.int;
         default = 768;
-        description = "Embedding vector dimension at startup (env var EMBEDDING_DIM).";
+        description = "Embedding vector dimension at startup (env var EMBEDDING_DIM). 768 = nomic-embed-text default.";
       };
 
       ollama = {
         url = lib.mkOption {
           type = lib.types.str;
           default = "http://localhost:11434";
-          description = "OLLAMA_URL env var. Only used when embedding.backend = \"ollama\".";
+          description = ''
+            OLLAMA_URL env var. Set to a real Ollama instance for now;
+            once the Ollama→OVMS shim ships in this flake, point it
+            there for NPU-backed embeddings.
+          '';
         };
         model = lib.mkOption {
           type = lib.types.str;
           default = "nomic-embed-text";
           description = "OLLAMA_EMBEDDING_MODEL env var.";
         };
-      };
-    };
-
-    # ---------- Pipeline embedding via patched OpenAI backend ----------
-    # The flake ships a vendored patch (pkgs/graphrag-rs.nix prePatch) that
-    # exposes `endpoint: Option<String>` on graphrag-core's EmbeddingConfig.
-    # That lets graphrag-rs's `[openai]` provider be redirected at any
-    # OpenAI-spec server — vLLM, llama.cpp server, OpenVINO Model Server's
-    # /v3/embeddings (NPU), etc.
-    openaiBackend = {
-      enable = lib.mkOption {
-        type = lib.types.bool;
-        default = false;
-        description = ''
-          When true, synthesize a pipeline config that points the [openai]
-          embedding provider at `apiBase` and POST it via ExecStartPost.
-
-          NPU recipe: stand up OVMS serving an embedding model on
-          /v3/embeddings, then set `enable = true; apiBase = "http://localhost:8000/v3/embeddings"`.
-        '';
-      };
-
-      apiBase = lib.mkOption {
-        type = lib.types.str;
-        default = "http://127.0.0.1:8000/v3/embeddings";
-        description = "Full OpenAI-compatible embeddings endpoint URL (NOT just the host).";
-      };
-
-      model = lib.mkOption {
-        type = lib.types.str;
-        default = "Qwen3-Embedding-0.6B";
-        description = "Model name as exposed by the OpenAI-compatible server.";
-      };
-
-      apiKey = lib.mkOption {
-        type = lib.types.str;
-        default = "dummy";
-        description = "API key. OVMS doesn't authenticate, but the patched provider still requires the field; \"dummy\" is fine.";
-      };
-
-      dimensions = lib.mkOption {
-        type = lib.types.nullOr lib.types.int;
-        default = null;
-        description = "Embedding dimensions. Null = let provider/model defaults decide.";
-      };
-
-      batchSize = lib.mkOption {
-        type = lib.types.int;
-        default = 32;
       };
     };
 
@@ -195,21 +133,23 @@ in
     };
 
     pipelineConfig = lib.mkOption {
-      type = lib.types.nullOr tomlFormat.type;
+      type = lib.types.nullOr (pkgs.formats.json { }).type;
       default = null;
       description = ''
-        Explicit pipeline config (TOML attrset). If non-null, takes precedence
-        over openaiBackend's auto-generated config. Schema is the upstream
-        [mode]/[general]/[hybrid.*] format — set this for full pipeline
-        control beyond just embeddings.
+        Optional pipeline config rendered to JSON and POSTed to /config
+        after the server starts. Schema is the upstream runtime config
+        (`graphrag-core::config::Config`); see what `GET /config/default`
+        returns for the full shape and example values.
+
+        Set null to skip — server runs with env-var defaults only.
       '';
     };
 
     applyPipelineConfig = lib.mkOption {
       type = lib.types.bool;
-      default = effectivePipelineConfig != null;
-      defaultText = "auto: true if pipelineConfig or openaiBackend is set";
-      description = "ExecStartPost POSTs the pipeline config to /api/config once /health is up.";
+      default = cfg.pipelineConfig != null;
+      defaultText = "auto: true if pipelineConfig is set";
+      description = "ExecStartPost POSTs the pipeline config to /config once /health is up.";
     };
 
     environment = lib.mkOption {
@@ -229,7 +169,7 @@ in
     home.packages = lib.mkIf cfg.installMcp [ cfg.mcpPackage ];
 
     xdg.configFile."graphrag-rs/mcp.json".source = mcpClientConfig;
-    xdg.configFile."graphrag-rs/pipeline.toml" = lib.mkIf (pipelineConfigFile != null) {
+    xdg.configFile."graphrag-rs/pipeline.json" = lib.mkIf (pipelineConfigFile != null) {
       source = pipelineConfigFile;
     };
 
@@ -260,11 +200,9 @@ in
               fi
               sleep 1
             done
-            # set_config takes JSON. Convert our TOML pipeline config first.
-            ${pkgs.remarshal}/bin/toml2json < ${pipelineConfigFile} \
-              | ${pkgs.curl}/bin/curl -fsS -X POST "$target" \
-                  -H 'Content-Type: application/json' \
-                  --data-binary @-
+            ${pkgs.curl}/bin/curl -fsS -X POST "$target" \
+              -H 'Content-Type: application/json' \
+              --data-binary @${pipelineConfigFile}
           '';
         })
       ];

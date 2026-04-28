@@ -37,28 +37,26 @@ imports = [ inputs.graphrag-rs.homeManagerModules.default ];
 services.graphrag-rs = {
   enable = true;
 
-  # Startup backend (env-var driven). Upstream graphrag-server only knows
-  # "hash" and "ollama" at startup; OpenAI/OVMS kicks in via openaiBackend
-  # below (POSTed pipeline config).
+  # Embedding backend. Upstream wires "hash" (deterministic, no model)
+  # and "ollama" (HTTP). For NPU embeddings, use "ollama" with the URL
+  # pointed at an Ollama→OVMS shim (TODO).
   embedding = {
-    backend = "hash";   # or "ollama" if you have Ollama running
-    dimension = 1024;
-  };
-
-  # NPU embeddings via OpenVINO Model Server.
-  # Relies on the vendored patch in pkgs/graphrag-rs.nix that adds
-  # `endpoint` to graphrag-core's EmbeddingConfig.
-  openaiBackend = {
-    enable = true;
-    apiBase = "http://127.0.0.1:8000/v3/embeddings";
-    model = "Qwen3-Embedding-0.6B";
-    dimensions = 1024;
+    backend = "ollama";
+    dimension = 768;
+    ollama = {
+      url = "http://127.0.0.1:11434";       # real Ollama for now
+      model = "nomic-embed-text";
+    };
   };
 
   qdrant = {
     url = "http://127.0.0.1:6334";
     collection = "graphrag";
   };
+
+  # Optional pipeline config — JSON-shaped, matches what /config/default
+  # returns. POSTed automatically after /health is up.
+  # pipelineConfig = null;
 };
 ```
 
