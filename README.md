@@ -37,23 +37,28 @@ imports = [ inputs.graphrag-rs.homeManagerModules.default ];
 services.graphrag-rs = {
   enable = true;
 
+  # Startup backend (env-var driven). Upstream graphrag-server only knows
+  # "hash" and "ollama" at startup; OpenAI/OVMS kicks in via openaiBackend
+  # below (POSTed pipeline config).
   embedding = {
-    backend = "ollama";              # see embedding-backend caveat below
-    dimension = 768;
-    ollama = {
-      url = "http://127.0.0.1:11434"; # TODO: point at the Ollama→OVMS shim
-      model = "nomic-embed-text";
-    };
+    backend = "hash";   # or "ollama" if you have Ollama running
+    dimension = 1024;
+  };
+
+  # NPU embeddings via OpenVINO Model Server.
+  # Relies on the vendored patch in pkgs/graphrag-rs.nix that adds
+  # `endpoint` to graphrag-core's EmbeddingConfig.
+  openaiBackend = {
+    enable = true;
+    apiBase = "http://127.0.0.1:8000/v3/embeddings";
+    model = "Qwen3-Embedding-0.6B";
+    dimensions = 1024;
   };
 
   qdrant = {
     url = "http://127.0.0.1:6334";
     collection = "graphrag";
   };
-
-  # Optional: full pipeline config POSTed to /api/config on startup.
-  # Schema: [mode] / [general] / [hybrid.*] etc. Set null to skip.
-  pipelineConfig = null;
 };
 ```
 
@@ -76,10 +81,23 @@ After reading upstream source (verified at the pinned commit):
   runtime pipeline config**, uploaded via `POST /api/config` after the
   server is up. Set `services.graphrag-rs.pipelineConfig` and an
   `ExecStartPost` will POST it for you (curl with retry).
-- **`api_base` is not a thing in upstream** — there is no way to point the
-  `[openai]` backend at OVMS directly. NPU embeddings require a tiny
-  Ollama→OVMS shim translating Ollama's `/api/embeddings` request format
-  to OVMS's OpenAI-compat `/v3/embeddings` (still TODO).
+- **`api_base` was not a thing in upstream** — `graphrag-core/src/embeddings/api_providers.rs:46` hardcodes `"https://api.openai.com/v1/embeddings"` in the OpenAI constructor with no config-level override. **This flake ships a vendored patch** (`pkgs/graphrag-rs.nix` `prePatch` block) that adds `endpoint: Option<String>` to `EmbeddingConfig` and a `with_endpoint` builder, plumbed end-to-end. With the patch, pointing the `[openai]` backend at OVMS's `/v3/embeddings` works directly — no shim required. The patch is additive and suitable for upstream PR.
+
+## NPU embedding flow with the patch
+
+Two paths exist; the patch only fixes one of them:
+
+| Path                    | Recognized backends                | OVMS works? |
+| ----------------------- | ---------------------------------- | ----------- |
+| Server startup (env vars: `EMBEDDING_BACKEND`) | `"hash"`, `"ollama"`           | ❌ openai not recognized at startup |
+| Pipeline config (`POST /api/config`)            | full set incl. `"openai"` + patched `endpoint` | ✅ patched `endpoint` honored |
+
+So the recipe is:
+1. Start `graphrag-server` with `EMBEDDING_BACKEND=hash` (the bootstrap).
+2. POST a pipeline TOML containing `[embeddings] provider = "openai"`, `endpoint = "http://ovms:port/v3/embeddings"`. The home-manager module's `openaiBackend.enable = true` synthesizes this and the `ExecStartPost` hook curls it once `/health` is up.
+3. From that point on, all pipeline ops (entity extraction, graph build, queries) hit OVMS — i.e. the NPU.
+
+Adding `"openai"` to the *startup* path too is a TODO (see `TODO.md` "Upstream patches needed").
 
 ## Pinning
 

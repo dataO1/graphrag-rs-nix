@@ -31,31 +31,51 @@ Tracked work items for `graphrag-rs-nix`. Tick boxes as you go.
 ## Upstream patches needed
 
 - [ ] **Server bind is hardcoded to `0.0.0.0:8080`** in
-      `graphrag-server/src/main.rs:1067`. No env var override. Options:
-      patch upstream to read `HOST` / `PORT`, vendor a small overlay, or
-      run nginx in front and let everyone bind localhost. Until then,
+      `graphrag-server/src/main.rs:1067`. No env var override. Patch to
+      read `HOST` / `PORT` env vars, default `127.0.0.1:8080`. Vendor via
+      `prePatch` like the embedding-endpoint patch. Until then,
       `services.graphrag-rs.{host,port}` only affect how clients address
-      the server, not what it binds to.
-- [ ] Server binds publicly (`0.0.0.0`) — for a per-user systemd unit on a
-      laptop this is wrong. Bind-address override is the right fix; in the
-      meantime the home-manager module should consider firewall guidance
-      or socket activation.
+      the server, and the server is reachable on any interface (firewall
+      it externally on multi-user hosts).
+- [ ] **Add an `"openai"` backend to graphrag-server's startup
+      `EmbeddingService`** (`graphrag-server/src/embeddings.rs` only knows
+      `"hash"` and `"ollama"`). New env vars: `OPENAI_URL`,
+      `OPENAI_EMBEDDING_MODEL`, `OPENAI_API_KEY`. New branch in
+      `EmbeddingService::new` constructing a small reqwest-based OpenAI
+      client (~60 LoC). Without this, NPU embeddings only kick in once
+      the pipeline config is POSTed; before that the server uses hash
+      fallback.
 
 ## NPU embeddings
 
-- [x] ~~Path A vs B decision~~ — **Path A is dead.** `api_base` literal
-      appears 0 times across the entire repo (verified via authenticated
-      GitHub code search). graphrag-server's startup `EmbeddingConfig`
-      (`graphrag-server/src/embeddings.rs`) only has `ollama_url` /
-      `ollama_model` for HTTP-backed embeddings. No way to point the
-      OpenAI backend at OVMS without patching.
-- [ ] **Write the Ollama→OVMS shim** (Path B). ~50–100 LoC: a HTTP server
-      that accepts Ollama's `/api/embeddings` request shape
-      (`{model, prompt}` or `{model, input}`) and proxies to OVMS's
-      `/v3/embeddings` (OpenAI-compat: `{model, input}` → embeddings array).
-      Add as `pkgs/ollama-ovms-shim.nix` + a `crates/ollama-ovms-shim/`
-      crate, plus a second systemd user service in the module. Then point
-      `services.graphrag-rs.embedding.ollama.url` at the shim's port.
+- [x] ~~Path A vs B decision~~ — **Path A revived via vendored patch.**
+      `api_base` literal didn't exist upstream, but
+      `graphrag-core/src/embeddings/api_providers.rs:46` hardcodes the
+      OpenAI URL in a constructor while the underlying `HttpEmbeddingProvider`
+      struct already has an `endpoint: String` field. Patch adds
+      `endpoint: Option<String>` to `EmbeddingConfig` /
+      `EmbeddingProviderConfig` and a `with_endpoint` builder, applied via
+      `prePatch` in `pkgs/graphrag-rs.nix`. With the patch, the `[openai]`
+      backend can be redirected at any OpenAI-spec server (OVMS, vLLM,
+      llama.cpp server) without a shim.
+- [x] ~~Write the Ollama→OVMS shim (Path B)~~ — superseded by the patch.
+      Keep this option in mind only as a fallback if the patch fails to
+      apply against a future upstream rev.
+- [ ] **Test the patch end-to-end against a real OVMS instance.** OVMS up
+      on `:8000/v3/embeddings`, set `services.graphrag-rs.openaiBackend.enable
+      = true`, observe entity extraction + queries hit OVMS in the logs
+      (NPU device load).
+- [ ] **Convert the substituteInPlace block to a real unified-diff `.patch`
+      file** once the patch is verified working. This makes it
+      upstream-PR-ready (`git format-patch` from the built derivation tree).
+      File at `patches/0001-embedding-config-endpoint-override.patch`,
+      consume via `patches = [ ./patches/...patch ];` in
+      `pkgs/graphrag-rs.nix` instead of `prePatch`.
+- [ ] **Send upstream PR** once the patch works. Two-line abstract:
+      "Add `endpoint: Option<String>` to `EmbeddingConfig` /
+      `EmbeddingProviderConfig` to allow OpenAI-spec providers to be
+      pointed at self-hosted OpenAI-compatible servers (vLLM, OVMS,
+      llama.cpp). Existing behavior unchanged when field is `None`."
 
 ## MCP wrapper
 
