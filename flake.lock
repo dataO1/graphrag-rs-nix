@@ -36,17 +36,17 @@
     "graphrag-rs-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1773823563,
-        "narHash": "sha256-44r0KTQVxTNicaol/NDwweLLNsmMDSnuuf2LsXgN5Vw=",
-        "owner": "automataIA",
+        "lastModified": 1777380062,
+        "narHash": "sha256-wqwKiatergdeLGPyYMgGI9awtwU8Y0ibQ+aWR/khQ+Y=",
+        "owner": "dataO1",
         "repo": "graphrag-rs",
-        "rev": "c46e2872fe7adc40e736981f1bf01dc71d829401",
+        "rev": "fee7490d52f75ecb8c547d4bf83d2d4ae4899a7c",
         "type": "github"
       },
       "original": {
-        "owner": "automataIA",
+        "owner": "dataO1",
+        "ref": "openai-compat",
         "repo": "graphrag-rs",
-        "rev": "c46e2872fe7adc40e736981f1bf01dc71d829401",
         "type": "github"
       }
     },

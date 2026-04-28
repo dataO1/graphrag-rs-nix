@@ -12,9 +12,13 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    # Upstream graphrag-rs source. Pinned to main; bump as needed.
+    # graphrag-rs source — our fork on the openai-compat branch. The fork
+    # carries vendored fixes that used to live in pkgs/graphrag-rs.nix's
+    # prePatch (qdrant-client features, /api/config scope-shadow, OLLAMA_PORT,
+    # /api/documents resource-merge) plus the new OpenAI-compatible embedding
+    # backend. Bump to local path during iteration.
     graphrag-rs-src = {
-      url = "github:automataIA/graphrag-rs/c46e2872fe7adc40e736981f1bf01dc71d829401";
+      url = "github:dataO1/graphrag-rs/openai-compat";
       flake = false;
     };
   };

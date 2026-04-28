@@ -21,6 +21,9 @@ let
     OLLAMA_URL = cfg.embedding.ollama.url;
     OLLAMA_PORT = toString cfg.embedding.ollama.port;
     OLLAMA_EMBEDDING_MODEL = cfg.embedding.ollama.model;
+    OPENAI_URL = cfg.embedding.openai.url;
+    OPENAI_EMBEDDING_MODEL = cfg.embedding.openai.model;
+    OPENAI_API_KEY = cfg.embedding.openai.apiKey;
     QDRANT_URL = cfg.qdrant.url;
     COLLECTION_NAME = cfg.qdrant.collection;
     RUST_LOG = cfg.logLevel;
@@ -86,20 +89,32 @@ in
     # Ollama→OVMS shim (TODO.md).
     embedding = {
       backend = lib.mkOption {
-        type = lib.types.enum [ "hash" "ollama" ];
-        default = "hash";
+        type = lib.types.enum [ "hash" "ollama" "openai" ];
+        default = "openai";
         description = ''
-          Embedding backend (env var EMBEDDING_BACKEND). Upstream
-          graphrag-server only wires "hash" (deterministic, no model) and
-          "ollama" (HTTP to OLLAMA_URL/api/embeddings) end-to-end. Setting
-          other values silently falls back to hash.
+          Embedding backend (env var EMBEDDING_BACKEND). Three options:
+
+          - "openai" — point at any OpenAI-compatible /embeddings server
+            (vLLM, OpenVINO Model Server, llama-server with --embedding,
+            real OpenAI API, OpenRouter, …) via `embedding.openai.*`.
+            Recommended default.
+          - "ollama" — talk Ollama protocol to a real Ollama instance via
+            `embedding.ollama.*`. Useful if you've already pulled embedding
+            models there.
+          - "hash" — deterministic hash-based fallback. No model required.
         '';
       };
 
       dimension = lib.mkOption {
         type = lib.types.int;
-        default = 768;
-        description = "Embedding vector dimension at startup (env var EMBEDDING_DIM). 768 = nomic-embed-text default.";
+        default = 1024;
+        description = ''
+          Embedding vector dimension at startup (env var EMBEDDING_DIM).
+          MUST match what your model returns or Qdrant inserts will fail
+          with a dim mismatch. Common values: 384 (MiniLM), 768
+          (nomic-embed-text, bge-base), 1024 (mxbai, bge-m3, bge-large),
+          4096 (Qwen3-Embedding-8B native).
+        '';
       };
 
       ollama = {
@@ -108,25 +123,51 @@ in
           default = "http://localhost";
           description = ''
             Host for Ollama (env var OLLAMA_URL). Just the scheme+host —
-            port is configured separately via `port` below. Point at a
-            real Ollama instance, or once the Ollama→OVMS shim lands in
-            this flake, point at that for NPU-backed embeddings.
+            port is configured separately via `port` below.
           '';
         };
         port = lib.mkOption {
           type = lib.types.port;
           default = 11434;
-          description = ''
-            Port for Ollama (env var OLLAMA_PORT — relies on the vendored
-            patch in `pkgs/graphrag-rs.nix` since upstream hardcodes 11434).
-            11434 = real Ollama default. The future Ollama→OVMS shim
-            should run on a different port to coexist with real Ollama.
-          '';
+          description = "Port for Ollama (env var OLLAMA_PORT). 11434 = real Ollama default.";
         };
         model = lib.mkOption {
           type = lib.types.str;
           default = "nomic-embed-text";
           description = "OLLAMA_EMBEDDING_MODEL env var.";
+        };
+      };
+
+      openai = {
+        url = lib.mkOption {
+          type = lib.types.str;
+          default = "http://127.0.0.1:9000/v3";
+          description = ''
+            Full OpenAI-compatible API base URL including the version path
+            (env var OPENAI_URL). Examples:
+              - http://127.0.0.1:8000/v1     vLLM (`vllm serve --task embed`)
+              - http://127.0.0.1:9000/v3     OpenVINO Model Server (services.graphrag-rs-npu)
+              - http://127.0.0.1:17171/v1    llama-server with --embedding
+              - https://api.openai.com/v1    real OpenAI
+          '';
+        };
+        model = lib.mkOption {
+          type = lib.types.str;
+          default = "embeddings";
+          description = ''
+            Model name sent in the request body's `model` field. For OVMS
+            the Mediapipe graph name is "embeddings"; for vLLM it's the
+            HF repo path; for OpenAI it's e.g. "text-embedding-3-small".
+          '';
+        };
+        apiKey = lib.mkOption {
+          type = lib.types.str;
+          default = "";
+          description = ''
+            Bearer token (env var OPENAI_API_KEY). Empty disables the
+            Authorization header — fine for self-hosted servers (vLLM,
+            OVMS, llama-server) that don't authenticate.
+          '';
         };
       };
     };
