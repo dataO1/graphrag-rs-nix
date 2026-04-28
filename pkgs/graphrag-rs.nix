@@ -81,6 +81,26 @@ let
         "            backend: \"ollama\".to_string(),
             ollama_port: 11434,"
 
+    # Fix doubled `resource("")` registration in /api/documents scope.
+    # Upstream does:
+    #     .service(resource("").route(get().to(list_documents)))
+    #     .service(resource("").route(post().to(add_document)))
+    # actix-web treats each .service(resource(""))... as a separate resource
+    # at the same path. The first one wins; the second is silently dropped,
+    # so POST /api/documents returns 405 with `allow: GET`. Merge into one
+    # resource with chained .route() calls.
+    substituteInPlace graphrag-server/src/main.rs \
+      --replace-fail \
+        "                        scope(\"/documents\")
+                            .service(resource(\"\").route(get().to(list_documents)))
+                            .service(resource(\"\").route(post().to(add_document)))
+                            .service(resource(\"/{id}\").route(delete().to(delete_document)))" \
+        "                        scope(\"/documents\")
+                            .service(resource(\"\")
+                                .route(get().to(list_documents))
+                                .route(post().to(add_document)))
+                            .service(resource(\"/{id}\").route(delete().to(delete_document)))"
+
     # Fix actix-web scope shadowing: upstream registers `web::scope("/api/config")`
     # AFTER the apistos `scope("/api")` and AFTER `.build()`, so /api/config
     # requests are caught by the broader /api scope first (which has no /config
