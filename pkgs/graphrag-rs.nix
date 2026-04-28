@@ -153,6 +153,49 @@ let
             endpoint: self.endpoint.clone(),
         })"
 
+    # 5b. Fix actix-web scope shadowing: upstream registers `web::scope("/api/config")`
+    #     AFTER `scope("/api")`, so /api/config requests are caught by the broader
+    #     /api scope first (which has no /config sub-route) and 404. Move the
+    #     /api/config routes INSIDE the /api scope as a /config sub-scope.
+    substituteInPlace graphrag-server/src/main.rs \
+      --replace-fail \
+        "                    .service(
+                        scope(\"/graph\")
+                            .service(resource(\"/build\").route(post().to(build_graph)))
+                            .service(resource(\"/stats\").route(get().to(graph_stats)))
+                    )
+            )" \
+        "                    .service(
+                        scope(\"/graph\")
+                            .service(resource(\"/build\").route(post().to(build_graph)))
+                            .service(resource(\"/stats\").route(get().to(graph_stats)))
+                    )
+                    // Config sub-scope (moved from outside /api to fix scope shadowing — patch).
+                    .service(
+                        web::scope(\"/config\")
+                            .route(\"\", web::get().to(config_endpoints::get_config))
+                            .route(\"\", web::post().to(config_endpoints::set_config))
+                            .route(\"/template\", web::get().to(config_endpoints::get_config_template))
+                            .route(\"/default\", web::get().to(config_endpoints::get_default_config))
+                            .route(\"/validate\", web::post().to(config_endpoints::validate_config))
+                    )
+            )"
+
+    # 5c. Remove the now-orphaned /api/config block at the bottom of main.rs
+    #     (replaced with empty string).
+    substituteInPlace graphrag-server/src/main.rs \
+      --replace-fail \
+        "            // Config endpoints (plain Actix-web routing — no #[api_operation] yet)
+            .service(
+                web::scope(\"/api/config\")
+                    .route(\"\", web::get().to(config_endpoints::get_config))
+                    .route(\"\", web::post().to(config_endpoints::set_config))
+                    .route(\"/template\", web::get().to(config_endpoints::get_config_template))
+                    .route(\"/default\", web::get().to(config_endpoints::get_default_config))
+                    .route(\"/validate\", web::post().to(config_endpoints::validate_config))
+            )" \
+        "            // (config sub-scope moved inside /api earlier in this builder)"
+
     # 6. Add `with_endpoint` builder method to HttpEmbeddingProvider and
     #    apply config.endpoint override at the end of from_config.
     substituteInPlace graphrag-core/src/embeddings/api_providers.rs \
