@@ -22,12 +22,7 @@ let
     PROTOC = "${protobuf}/bin/protoc";
     OPENSSL_NO_VENDOR = "1";
 
-    # --no-default-features drops qdrant-client (default feature of
-    # graphrag-server). qdrant-client v1.15.0's build.rs writes into its own
-    # crate source dir which is read-only in Nix's sandbox; until we patch
-    # that build script, run graphrag-server in its in-memory fallback mode.
-    # Tracked in TODO.md "Build & packaging".
-    cargoExtraArgs = "--locked --no-default-features -p graphrag-server -p graphrag-cli";
+    cargoExtraArgs = "--locked -p graphrag-server -p graphrag-cli";
 
     doCheck = false;
 
@@ -42,6 +37,20 @@ let
     # Keep this in sync with the upstream code at the pinned commit.
     # Verified against automataIA/graphrag-rs@c46e2872.
     prePatch = ''
+      # 0. qdrant-client v1.15.0 ships `generate-snippets` as a DEFAULT
+      #    feature (Cargo.toml:34), and that feature's build.rs writes test
+      #    snippets back into its own crate source dir — read-only in the
+      #    Nix sandbox, so the build panics with PermissionDenied. The
+      #    feature is internal CI tooling for qdrant-client maintainers,
+      #    not something consumers need. Disable it workspace-wide by
+      #    overriding the workspace dep declaration to opt out of defaults
+      #    and re-enable just the bits we want. All members inherit via
+      #    `qdrant-client = { workspace = true, ... }`.
+      substituteInPlace Cargo.toml \
+        --replace-fail \
+          'qdrant-client = "1.11"' \
+          'qdrant-client = { version = "1.11", default-features = false, features = ["download_snapshots", "serde"] }'
+
       # 1. Add `endpoint: Option<String>` field to EmbeddingConfig.
       substituteInPlace graphrag-core/src/embeddings/mod.rs \
         --replace-fail \

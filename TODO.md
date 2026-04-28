@@ -4,19 +4,17 @@ Tracked work items for `graphrag-rs-nix`. Tick boxes as you go.
 
 ## Build & packaging
 
-- [ ] First successful `nix build .#graphrag-server`. Currently failing on
-      `qdrant-client v1.15.0`'s build.rs which writes generated test
-      snippets back into its own (read-only) vendored crate dir. Worked
-      around by `--no-default-features` (drops qdrant-client; server runs
-      in in-memory storage fallback). Iterate on `pkgs/graphrag-rs.nix`
-      until the workaround sticks; surface other missing native deps as
-      they appear.
-- [ ] **Re-enable Qdrant**: patch qdrant-client's build.rs so the
-      snippet-generation path is a no-op when the source dir isn't
-      writable, OR pin qdrant-client back to 1.11.x via a `[patch]` block
-      and check whether 1.11 has the same issue. Then drop the
-      `--no-default-features` workaround. Without this, embedding vectors
-      live in-memory and reset on every server restart.
+- [ ] First successful `nix build .#graphrag-server`. Iterate on
+      `pkgs/graphrag-rs.nix` for any further missing native deps.
+- [x] ~~Re-enable Qdrant~~ — root cause found: qdrant-client v1.15.0 ships
+      `generate-snippets` (its internal CI test-codegen tooling) as a
+      DEFAULT feature, and the build.rs gated by that feature writes back
+      into its own read-only vendored crate dir. Fixed by patching the
+      workspace `Cargo.toml` in `prePatch` to declare qdrant-client with
+      `default-features = false, features = ["download_snapshots", "serde"]`.
+      All workspace members inherit this via `{ workspace = true }`,
+      so generate-snippets is off everywhere; `download_snapshots`
+      (snapshot upload/download) and `serde` (Qdrant type ser/de) stay on.
 - [ ] First successful `nix build .#graphrag-mcp`.
 - [ ] Add `nix flake check` (with build) to a CI workflow once builds pass.
 - [ ] Decide whether to expose `graphrag-cli` separately or drop it (it's
