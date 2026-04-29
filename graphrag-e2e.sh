@@ -408,45 +408,140 @@ if [ -z "$MCP_BIN" ] || [ ! -x "$MCP_BIN" ]; then
   log_warn "graphrag-mcp binary not found (skip — set installMcp=true on the HM module)"
 else
   log_info "Using $MCP_BIN"
-  # Send initialize → initialized notification → tools/list → tools/call.
-  # MCP framing: newline-delimited JSON-RPC 2.0 on stdin/stdout. EOF on
-  # stdin makes graphrag-mcp's read loop exit cleanly; timeout is just a
-  # belt-and-braces guard.
+  # Drive a full tool tour through one stdio session — the MCP server
+  # reads newline-delimited JSON-RPC 2.0 and replies in registration
+  # order. EOF on stdin closes the loop cleanly; timeout guards
+  # genuinely-stuck child processes (e.g. backend hanging on build).
+  # Per-call ids let us pluck specific responses out of the stream
+  # regardless of ordering.
+  MCP_DOC_ID="e2e-mcp-$$"
   MCP_OUT=$(printf '%s\n' \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"graphrag-e2e","version":"1.0"}}}' \
     '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
     '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
     '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"graph_stats","arguments":{}}}' \
-    | GRAPHRAG_BASE_URL="$BASE_URL" timeout 30 "$MCP_BIN" 2>/dev/null)
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_documents","arguments":{}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"add_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\",\"title\":\"MCP Test Doc\",\"content\":\"Diffusion models like DDPM and DDIM denoise latent images iteratively. Stable Diffusion uses a U-Net backbone.\"}}}" \
+    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"query","arguments":{"question":"diffusion model","max_results":3}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\"}}}" \
+    | GRAPHRAG_BASE_URL="$BASE_URL" timeout 60 "$MCP_BIN" 2>/dev/null)
 
   if [ -z "$MCP_OUT" ]; then
     log_fail "graphrag-mcp produced no output"
   else
-    # Line 1 — initialize response
-    INIT_PROTO=$(echo "$MCP_OUT" | sed -n '1p' | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.protocolVersion || '')" 2>/dev/null)
+    # Pluck a response by id — the protocol guarantees id round-trip.
+    # Wrapped in an IIFE because top-level `return` is illegal in
+    # node -e (it's not a function body).
+    mcp_resp() {
+      echo "$MCP_OUT" | $NODE -e "
+        (function() {
+          const lines = require('fs').readFileSync('/dev/stdin','utf8').trim().split(/\n/);
+          for (const l of lines) {
+            try { const r = JSON.parse(l); if (r.id === $1) { console.log(JSON.stringify(r)); return; } } catch (e) {}
+          }
+        })();
+      " 2>/dev/null
+    }
+    # And helpers to dig into the result envelope MCP returns.
+    mcp_proto() { echo "$1" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.protocolVersion || '')" 2>/dev/null; }
+    mcp_tools_count() { echo "$1" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.tools?.length ?? 0)" 2>/dev/null; }
+    mcp_tools_names() { echo "$1" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.tools?.map(t=>t.name).join(', ') || '')" 2>/dev/null; }
+    mcp_is_error()    { echo "$1" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.isError ?? 'parse-fail')" 2>/dev/null; }
+    # Tool calls return result.content[0].text — a JSON-encoded string of
+    # the upstream REST response. Decode that and pluck a top-level key.
+    mcp_call_text_field() {
+      echo "$1" | $NODE -e "
+        const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        const txt = r.result?.content?.[0]?.text ?? '';
+        try { console.log(JSON.parse(txt).$2 ?? ''); } catch (e) { console.log(''); }
+      " 2>/dev/null
+    }
+
+    # 1 — initialize handshake
+    R1=$(mcp_resp 1)
+    INIT_PROTO=$(mcp_proto "$R1")
     if [ "$INIT_PROTO" = "2024-11-05" ]; then
-      log_pass "MCP initialize handshake (protocol $INIT_PROTO)"
+      log_pass "initialize handshake (protocol $INIT_PROTO)"
     else
-      log_fail "MCP initialize failed (got proto: '$INIT_PROTO')"
+      log_fail "initialize failed (got proto: '$INIT_PROTO')"
     fi
 
-    # Line 2 — tools/list response
-    TOOL_COUNT=$(echo "$MCP_OUT" | sed -n '2p' | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.tools?.length ?? 0)" 2>/dev/null)
-    TOOL_NAMES=$(echo "$MCP_OUT" | sed -n '2p' | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.tools?.map(t=>t.name).join(', ') || '')" 2>/dev/null)
+    # 2 — tools/list
+    R2=$(mcp_resp 2)
+    TOOL_COUNT=$(mcp_tools_count "$R2")
+    TOOL_NAMES=$(mcp_tools_names "$R2")
     if [ "${TOOL_COUNT:-0}" -ge 6 ] 2>/dev/null; then
-      log_pass "MCP advertises $TOOL_COUNT tools"
-      log_info "Tools: $TOOL_NAMES"
+      log_pass "tools/list advertises $TOOL_COUNT tools"
+      log_info "  Tools: $TOOL_NAMES"
     else
-      log_fail "MCP tool count too low: $TOOL_COUNT (expected ≥6)"
+      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥6)"
     fi
 
-    # Line 3 — tools/call graph_stats response (proxies to /api/graph/stats)
-    CALL_ERR=$(echo "$MCP_OUT" | sed -n '3p' | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.isError ?? 'parse-fail')" 2>/dev/null)
-    if [ "$CALL_ERR" = "false" ]; then
-      log_pass "MCP tools/call → graph_stats returned without error"
+    # 3 — tools/call graph_stats
+    R3=$(mcp_resp 3)
+    if [ "$(mcp_is_error "$R3")" = "false" ]; then
+      ENT=$(mcp_call_text_field "$R3" "entityCount")
+      REL=$(mcp_call_text_field "$R3" "relationshipCount")
+      log_pass "tools/call graph_stats — entities=$ENT relationships=$REL"
     else
-      log_fail "MCP tools/call → graph_stats failed (isError=$CALL_ERR)"
+      log_fail "tools/call graph_stats failed (isError=$(mcp_is_error "$R3"))"
     fi
+
+    # 4 — tools/call list_documents
+    R4=$(mcp_resp 4)
+    if [ "$(mcp_is_error "$R4")" = "false" ]; then
+      TOTAL=$(mcp_call_text_field "$R4" "total")
+      log_pass "tools/call list_documents — total=$TOTAL"
+    else
+      log_fail "tools/call list_documents failed (isError=$(mcp_is_error "$R4"))"
+    fi
+
+    # 5 — tools/call add_document (creates a doc the query test will hit)
+    R5=$(mcp_resp 5)
+    if [ "$(mcp_is_error "$R5")" = "false" ]; then
+      ADD_OK=$(mcp_call_text_field "$R5" "success")
+      ADD_ID=$(mcp_call_text_field "$R5" "documentId")
+      if [ "$ADD_OK" = "true" ]; then
+        log_pass "tools/call add_document — id=$ADD_ID"
+      else
+        log_fail "tools/call add_document returned success=false"
+      fi
+    else
+      log_fail "tools/call add_document failed (isError=$(mcp_is_error "$R5"))"
+    fi
+
+    # 6 — tools/call query (the bug the user just reported: 400 from
+    # backend because MCP was sending question/max_results instead of
+    # query/top_k). isError=false here means the field translation
+    # works end-to-end.
+    R6=$(mcp_resp 6)
+    if [ "$(mcp_is_error "$R6")" = "false" ]; then
+      Q_RESULTS=$(echo "$R6" | $NODE -e "
+        const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        const txt = r.result?.content?.[0]?.text ?? '';
+        try { console.log((JSON.parse(txt).results || []).length); } catch (e) { console.log('?'); }
+      " 2>/dev/null)
+      log_pass "tools/call query — got $Q_RESULTS results (translation question→query, max_results→top_k)"
+    else
+      Q_ERR=$(echo "$R6" | $NODE -e "
+        const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        console.log(r.result?.content?.[0]?.text || JSON.stringify(r));
+      " 2>/dev/null | head -c 200)
+      log_fail "tools/call query failed: $Q_ERR"
+    fi
+
+    # 7 — tools/call delete_document (cleans up the doc we added)
+    R7=$(mcp_resp 7)
+    if [ "$(mcp_is_error "$R7")" = "false" ]; then
+      log_pass "tools/call delete_document — cleaned up $MCP_DOC_ID"
+    else
+      log_warn "tools/call delete_document failed (isError=$(mcp_is_error "$R7"))"
+    fi
+
+    # build_graph deliberately not invoked here — it's a 15-60s LLM
+    # round-trip per ingested doc and Test 7 already covered it via the
+    # REST path. Rebuilding the graph just to re-prove MCP wiring would
+    # double the e2e runtime for no signal.
   fi
 fi
 

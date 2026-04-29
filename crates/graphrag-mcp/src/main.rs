@@ -136,9 +136,13 @@ async fn call_tool(client: &Client, cfg: &Config, name: &str, args: &Value) -> R
     let base = &cfg.base_url;
     let resp_value = match name {
         "query" => {
+            // graphrag-server's QueryRequest takes `query` + `top_k`,
+            // not `question` + `max_results`. Tool input names stay
+            // human-friendly; we translate here so callers don't need to
+            // know the wire shape.
             let body = json!({
-                "question": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
-                "max_results": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
+                "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
+                "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
             });
             let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
             r.error_for_status()?.json::<Value>().await?
