@@ -38,11 +38,13 @@ let
     PROTOC = "${protobuf}/bin/protoc";
     OPENSSL_NO_VENDOR = "1";
 
-    # `--features ollama` enables ollama-rs in graphrag-server. Without it
-    # graphrag-server logs "Ollama support not compiled in" when
-    # EMBEDDING_BACKEND=ollama and falls back to hash. The new openai
-    # backend is unconditional (reqwest is always compiled in).
-    cargoExtraArgs = "--locked -p graphrag-server -p graphrag-cli --features graphrag-server/ollama";
+    # Enable both LLM/embedding backends in the same build so users can
+    # switch at runtime via config.{ollama,openai}.enabled and
+    # EMBEDDING_BACKEND=ollama|openai|hash. Mirrors the upstream
+    # `ollama` feature pattern; `openai` was added on the openai-compat
+    # branch and gates the OpenAIClient + ChatClient::OpenAI dispatch
+    # arm + EmbeddingService's openai branch.
+    cargoExtraArgs = "--locked -p graphrag-server -p graphrag-cli --features graphrag-server/ollama,graphrag-server/openai";
 
     doCheck = false;
   };
