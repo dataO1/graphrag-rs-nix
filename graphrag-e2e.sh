@@ -321,6 +321,60 @@ else
 fi
 
 # ============================================================
+# TEST 9: MCP Server (graphrag-mcp stdio bridge)
+# ============================================================
+log_step "TEST 9 — MCP Server (graphrag-mcp)"
+
+MCP_BIN=$(command -v graphrag-mcp 2>/dev/null \
+  || ls /etc/profiles/per-user/*/bin/graphrag-mcp 2>/dev/null | head -1)
+
+if [ -z "$MCP_BIN" ] || [ ! -x "$MCP_BIN" ]; then
+  log_warn "graphrag-mcp binary not found (skip — set installMcp=true on the HM module)"
+else
+  log_info "Using $MCP_BIN"
+  # Send initialize → initialized notification → tools/list → tools/call.
+  # MCP framing: newline-delimited JSON-RPC 2.0 on stdin/stdout. EOF on
+  # stdin makes graphrag-mcp's read loop exit cleanly; timeout is just a
+  # belt-and-braces guard.
+  MCP_OUT=$(printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"graphrag-e2e","version":"1.0"}}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"graph_stats","arguments":{}}}' \
+    | GRAPHRAG_BASE_URL="$BASE_URL" timeout 30 "$MCP_BIN" 2>/dev/null)
+
+  if [ -z "$MCP_OUT" ]; then
+    log_fail "graphrag-mcp produced no output"
+  else
+    # Line 1 — initialize response
+    INIT_PROTO=$(echo "$MCP_OUT" | sed -n '1p' | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.protocolVersion || '')" 2>/dev/null)
+    if [ "$INIT_PROTO" = "2024-11-05" ]; then
+      log_pass "MCP initialize handshake (protocol $INIT_PROTO)"
+    else
+      log_fail "MCP initialize failed (got proto: '$INIT_PROTO')"
+    fi
+
+    # Line 2 — tools/list response
+    TOOL_COUNT=$(echo "$MCP_OUT" | sed -n '2p' | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.tools?.length ?? 0)" 2>/dev/null)
+    TOOL_NAMES=$(echo "$MCP_OUT" | sed -n '2p' | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.tools?.map(t=>t.name).join(', ') || '')" 2>/dev/null)
+    if [ "${TOOL_COUNT:-0}" -ge 6 ] 2>/dev/null; then
+      log_pass "MCP advertises $TOOL_COUNT tools"
+      log_info "Tools: $TOOL_NAMES"
+    else
+      log_fail "MCP tool count too low: $TOOL_COUNT (expected ≥6)"
+    fi
+
+    # Line 3 — tools/call graph_stats response (proxies to /api/graph/stats)
+    CALL_ERR=$(echo "$MCP_OUT" | sed -n '3p' | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.isError ?? 'parse-fail')" 2>/dev/null)
+    if [ "$CALL_ERR" = "false" ]; then
+      log_pass "MCP tools/call → graph_stats returned without error"
+    else
+      log_fail "MCP tools/call → graph_stats failed (isError=$CALL_ERR)"
+    fi
+  fi
+fi
+
+# ============================================================
 # SUMMARY
 # ============================================================
 log_step "SUMMARY"
