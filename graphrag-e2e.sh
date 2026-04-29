@@ -470,11 +470,11 @@ else
     R2=$(mcp_resp 2)
     TOOL_COUNT=$(mcp_tools_count "$R2")
     TOOL_NAMES=$(mcp_tools_names "$R2")
-    if [ "${TOOL_COUNT:-0}" -ge 6 ] 2>/dev/null; then
+    if [ "${TOOL_COUNT:-0}" -ge 7 ] 2>/dev/null; then
       log_pass "tools/list advertises $TOOL_COUNT tools"
       log_info "  Tools: $TOOL_NAMES"
     else
-      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥6)"
+      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥7 — query, graph_stats, list_documents, add_document, delete_document, append_graph, build_graph)"
     fi
 
     # 3 — tools/call graph_stats
@@ -543,6 +543,46 @@ else
     # REST path. Rebuilding the graph just to re-prove MCP wiring would
     # double the e2e runtime for no signal.
   fi
+fi
+
+# ============================================================
+# TEST 10: Graph Append Endpoint (incremental fast-path)
+# ============================================================
+log_step "TEST 10 — Graph Append (POST /api/graph/append)"
+
+# Test 7 just ran a full build over every chunk; the live chunk count
+# now equals processed_chunk_count, so /append should hit the fast
+# no-op path and return ~immediately with documentCount: 0. This
+# verifies (a) the endpoint exists, (b) the no-op fast-path works,
+# (c) last_built_at is exposed via graph_stats.
+APPEND_T0=$(now_ms)
+APPEND_RESPONSE=$(http_post "$BASE_URL/api/graph/append" '{}' 2>&1)
+APPEND_T1=$(now_ms)
+
+if [ -z "${APPEND_RESPONSE:-}" ]; then
+  log_fail "/api/graph/append returned no body (older server build? rebuild needed)"
+elif echo "$APPEND_RESPONSE" | grep -q '"success":true'; then
+  APPEND_NEW=$(echo "$APPEND_RESPONSE" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).documentCount ?? 'unknown')" 2>/dev/null)
+  APPEND_MSG=$(echo "$APPEND_RESPONSE" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).message ?? '')" 2>/dev/null)
+  APPEND_MS=$(( APPEND_T1 - APPEND_T0 ))
+  log_pass "Append endpoint responds (newChunks=$APPEND_NEW in ${APPEND_MS}ms)"
+  log_info "  Message: $APPEND_MSG"
+  # Sanity check: the no-op should be <1s. Anything slower means the
+  # fast-path tripped a full rebuild despite no chunks growing.
+  if [ "$APPEND_NEW" = "0" ] && [ "$APPEND_MS" -gt 1000 ] 2>/dev/null; then
+    log_warn "no-op append took ${APPEND_MS}ms — fast-path may not be engaging"
+  fi
+else
+  log_fail "Append failed: $APPEND_RESPONSE"
+fi
+
+# Confirm /api/graph/stats now exposes lastBuiltAt (set by Test 7's build).
+STATS_AFTER=$(http_get "$BASE_URL/api/graph/stats")
+LAST_BUILT=$(echo "$STATS_AFTER" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).lastBuiltAt ?? '')" 2>/dev/null)
+if [ -n "$LAST_BUILT" ]; then
+  log_pass "graph_stats.lastBuiltAt = $LAST_BUILT"
+else
+  log_warn "graph_stats.lastBuiltAt missing (older server build?)"
 fi
 
 # ============================================================
