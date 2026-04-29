@@ -7,7 +7,14 @@ set -o pipefail
 # --- Configuration ---
 BASE_URL="${GRAPHRAG_URL:-http://127.0.0.1:8080}"
 NPU_URL="${NPU_URL:-http://127.0.0.1:9000}"
-LLM_URL="${LLM_URL:-http://127.0.0.1:17171/v1}"
+# Default to the local LLM router on :17170 (services.llm-router) which
+# multiplexes whichever backend is currently up — vLLM on :8000,
+# llama-server on :17171, etc. Test 4 just probes /models and runs a
+# small generation, so it doesn't need to know which backend is live.
+# Override with LLM_URL=http://127.0.0.1:17171/v1 to test the
+# llama-server-direct path that graphrag-server itself talks to.
+LLM_URL="${LLM_URL:-http://127.0.0.1:17170/v1}"
+LLM_MODEL="${LLM_MODEL:-local-llm}"
 QDRANT_URL="${QDRANT_URL:-http://localhost:6333}"
 CURL="/run/current-system/sw/bin/curl"
 NODE="/etc/profiles/per-user/data01/bin/node"
@@ -208,32 +215,46 @@ else
 fi
 
 # ============================================================
-# TEST 4: LLM Backend (llama-server)
+# TEST 4: LLM backend reachability + a quick generation probe
 # ============================================================
-log_step "TEST 4 — LLM Backend (llama-server)"
+# By default LLM_URL points at the local LLM router (:17170) which
+# multiplexes vLLM / llama-server / etc. behind a stable model name.
+# The router's response shape is OpenAI-compatible, so this same
+# test works whether the active backend is vLLM (Magistral, Qwen,
+# …) or a llama-server build. Override LLM_URL=…:17171/v1 to hit
+# llama-server directly.
+log_step "TEST 4 — LLM Backend ($LLM_URL)"
 
 LLM_MODELS=$(http_get "$LLM_URL/models" 2>/dev/null) || {
-  log_fail "llama-server unreachable at $LLM_URL"
+  log_fail "LLM endpoint unreachable at $LLM_URL"
   SKIP_LLM=true
 }
 
 if [ -n "${LLM_MODELS:-}" ]; then
-  log_pass "llama-server reachable"
+  log_pass "LLM endpoint reachable"
   MODEL_LIST=$(jq_field "$LLM_MODELS" "data[0].id" 2>/dev/null || echo "unknown")
-  log_info "Available models: $MODEL_LIST"
+  log_info "First reported model id: $MODEL_LIST"
+  log_info "Probe will request model: $LLM_MODEL  (override via env LLM_MODEL=…)"
 
-  # Quick generation test. Use the model id reported by /models (so the
-  # test stays correct as the loaded GGUF changes), and disable Qwen3
-  # thinking via chat_template_kwargs so a few-token cap actually yields
-  # content (otherwise reasoning tokens consume the whole budget).
+  # Quick generation test. Use the configured LLM_MODEL — the router
+  # exposes stable ids ("local-llm", "local-magistral", "local-qwen3.6")
+  # rather than whatever model the active backend reports, so we don't
+  # have to follow GGUF/AWQ name churn here.
+  #
+  # max_tokens is generous (200) so a reasoning model can finish its
+  # thinking and still emit "hello" before the cap. We deliberately do
+  # NOT send chat_template_kwargs here — vLLM with Mistral tokenizers
+  # rejects it (400 "chat_template is not supported for Mistral
+  # tokenizers"), and Qwen3 / DeepSeek tokenizers handle reasoning
+  # within a generous budget. graphrag-server itself sets
+  # extra_body.chat_template_kwargs for its own Qwen3 path; that's a
+  # separate concern from this smoke test.
   log_info "Running quick LLM generation test..."
-  TEST_MODEL="${MODEL_LIST:-Qwen3.6-27B}"
   GEN_TEST=$(http_post "$LLM_URL/chat/completions" "{
-    \"model\": \"$TEST_MODEL\",
-    \"messages\": [{\"role\":\"user\",\"content\":\"Reply with only the word hello.\"}],
-    \"max_tokens\": 32,
-    \"temperature\": 0,
-    \"chat_template_kwargs\": {\"enable_thinking\": false}
+    \"model\": \"$LLM_MODEL\",
+    \"messages\": [{\"role\":\"user\",\"content\":\"Reply with only the word hello, lowercase, no punctuation.\"}],
+    \"max_tokens\": 200,
+    \"temperature\": 0
   }" 2>/dev/null)
 
   if [ -n "${GEN_TEST:-}" ]; then
