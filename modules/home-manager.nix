@@ -372,6 +372,28 @@ in
       default = "info";
       description = "RUST_LOG value for the server.";
     };
+
+    appendInterval = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "30min";
+      description = ''
+        When set, deploys a `graphrag-rs-append.timer` user unit that
+        periodically POSTs to `/api/graph/append` so newly-ingested
+        documents land in the entity graph without manual intervention.
+        Value is a systemd time-span string (`OnUnitInactiveSec`
+        format) — `"30min"`, `"1h"`, `"2h30min"`, etc.
+
+        The timer fires only when the previous tick has finished, so
+        runs never overlap. The append endpoint itself is a fast
+        no-op when nothing has been ingested since the last
+        build/append, so the cron is cheap on idle vaults.
+
+        Null (default) deploys neither the timer nor its service —
+        agents/users drive append manually via the MCP tool or
+        `curl -X POST /api/graph/append`.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -424,6 +446,49 @@ in
 
       Install = {
         WantedBy = [ "default.target" ];
+      };
+    };
+
+    # Append timer + oneshot — deployed only when appendInterval is set.
+    # The service does one POST to /api/graph/append; the server-side
+    # fast-path makes this a no-op when nothing's changed, so it's safe
+    # to fire on a tight cadence (default mental model: 30min). Failure
+    # is non-fatal (curl exits non-zero, systemd marks the run failed,
+    # next tick still fires) — the next ingest will trigger the next
+    # append anyway.
+    systemd.user.services.graphrag-rs-append = lib.mkIf (cfg.appendInterval != null) {
+      Unit = {
+        Description = "graphrag-rs: append newly-ingested chunks to the knowledge graph";
+        # Timer waits for graphrag-rs.service to be Active; explicit
+        # Requires/After on the service so a timer tick that fires
+        # before the server is up just queues until it is.
+        Requires = [ "graphrag-rs.service" ];
+        After = [ "graphrag-rs.service" ];
+      };
+      Service = {
+        Type = "oneshot";
+        ExecStart = "${pkgs.curl}/bin/curl -fsS -X POST 'http://${cfg.host}:${toString cfg.port}/api/graph/append' -o /dev/null";
+        # No restart — let the timer drive recurrence.
+        TimeoutStartSec = "1h";
+      };
+    };
+
+    systemd.user.timers.graphrag-rs-append = lib.mkIf (cfg.appendInterval != null) {
+      Unit = {
+        Description = "graphrag-rs: schedule periodic /api/graph/append";
+      };
+      Timer = {
+        # OnUnitInactiveSec means "X after the previous run finished",
+        # which prevents runs from stacking when an append takes longer
+        # than the interval. OnBootSec gives a delayed first fire so
+        # the server has time to come up after boot.
+        OnBootSec = "5min";
+        OnUnitInactiveSec = cfg.appendInterval;
+        Persistent = true;
+        Unit = "graphrag-rs-append.service";
+      };
+      Install = {
+        WantedBy = [ "timers.target" ];
       };
     };
   };
