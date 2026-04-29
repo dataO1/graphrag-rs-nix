@@ -27,6 +27,8 @@ let
         timeout_seconds = cfg.chat.openai.timeoutSeconds;
       } // lib.optionalAttrs (cfg.chat.maxTokens != null) {
         max_tokens = cfg.chat.maxTokens;
+      } // lib.optionalAttrs (cfg.chat.openai.extraBody != { }) {
+        extra_body = cfg.chat.openai.extraBody;
       };
     } else {
       ollama = {
@@ -294,6 +296,26 @@ in
           type = lib.types.int;
           default = 600;
           description = "HTTP request timeout in seconds (upstream default is 60). Set higher for slow local models.";
+        };
+        extraBody = lib.mkOption {
+          type = (pkgs.formats.json { }).type;
+          default = { };
+          example = lib.literalExpression ''{ chat_template_kwargs = { enable_thinking = false; }; }'';
+          description = ''
+            Extra top-level fields merged into every /chat/completions
+            request body. Lets you pass server-specific knobs without
+            touching the server CLI. Examples:
+
+              - llama.cpp / vLLM Qwen3 thinking suppression:
+                  { chat_template_kwargs.enable_thinking = false; }
+              - vLLM JSON-only output:
+                  { response_format = { type = "json_object"; }; }
+              - OpenAI structured outputs:
+                  { response_format = { type = "json_schema"; ... }; }
+
+            Existing fields set elsewhere (model, max_tokens, temperature,
+            stop, top_p) take precedence over collisions.
+          '';
         };
       };
 
