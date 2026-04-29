@@ -48,6 +48,42 @@ http_delete() {
   $CURL -sf "$1" -X DELETE 2>&1
 }
 
+# --- NPU + timing helpers ---
+NPU_BUSY_FILE="/sys/class/accel/accel0/device/npu_busy_time_us"
+
+npu_busy() {
+  if [ -r "$NPU_BUSY_FILE" ]; then cat "$NPU_BUSY_FILE"; else echo "-1"; fi
+}
+now_ms() {
+  # date +%s%3N is GNU-only; coreutils on NixOS has it. Falls back to seconds.
+  date +%s%3N 2>/dev/null || echo $(( $(date +%s) * 1000 ))
+}
+# Format a (start_npu, end_npu, start_ms, end_ms) tuple into a one-liner.
+# Marks the embedding source by NPU delta: ≥1ms NPU work ⇒ NPU/OVMS, else
+# either fallback hash or a cached path. Reads /api/embeddings/stats for
+# the authoritative backend name (after rebuild — handler is new in this
+# graphrag-rs commit).
+fmt_call_perf() {
+  local b0=$1 b1=$2 t0=$3 t1=$4
+  local req_ms=$(( t1 - t0 ))
+  if [ "$b0" = "-1" ] || [ "$b1" = "-1" ]; then
+    echo "${req_ms}ms (NPU counter unavailable)"
+  else
+    local npu_us=$(( b1 - b0 ))
+    local npu_ms=$(( npu_us / 1000 ))
+    if [ "$npu_us" -ge 1000 ] 2>/dev/null; then
+      echo "${req_ms}ms wall (NPU +${npu_ms}ms = ${npu_us}us — OVMS path)"
+    else
+      echo "${req_ms}ms wall (NPU Δ${npu_us}us — hash/cache path)"
+    fi
+  fi
+}
+# Best-effort: hit /api/embeddings/stats. If the endpoint isn't there
+# yet (older server build), return empty so callers can degrade.
+embed_source() {
+  $CURL -sf --max-time 2 "$BASE_URL/api/embeddings/stats" 2>/dev/null || echo ""
+}
+
 # --- Parse args ---
 for arg in "$@"; do
   case "$arg" in
@@ -116,7 +152,28 @@ fi
 # Check embedding config
 EMB_BACKEND=$(jq_field "$CONFIG" "config.embeddings.backend")
 EMB_DIM=$(jq_field "$CONFIG" "config.embeddings.dimension")
-log_info "Embeddings: backend=$EMB_BACKEND dim=$EMB_DIM"
+log_info "Embeddings (graphrag-core internal config): backend=$EMB_BACKEND dim=$EMB_DIM"
+# The /config struct is graphrag-core's *internal* embedding config —
+# NOT the runtime path graphrag-server actually uses for /api/documents
+# and /api/query (which goes through EmbeddingService). The new
+# /api/embeddings/stats endpoint reports the latter. Older server builds
+# without the endpoint return empty here.
+EMB_STATS_INIT=$(embed_source)
+if [ -n "$EMB_STATS_INIT" ]; then
+  EMB_RUNTIME_BACKEND=$(jq_field "$EMB_STATS_INIT" "backend")
+  EMB_RUNTIME_DIM=$(jq_field "$EMB_STATS_INIT" "dimension")
+  EMB_REQS_BEFORE=$(jq_field "$EMB_STATS_INIT" "stats.total_requests")
+  log_info "Embeddings (runtime EmbeddingService): backend=$EMB_RUNTIME_BACKEND dim=$EMB_RUNTIME_DIM total_requests=$EMB_REQS_BEFORE"
+  case "$EMB_RUNTIME_BACKEND" in
+    openai)         log_pass "Runtime embedding backend = openai (OVMS / NPU expected)" ;;
+    ollama)         log_pass "Runtime embedding backend = ollama" ;;
+    hash-fallback)  log_warn "Runtime embedding backend = hash-fallback (OVMS unreachable at startup?)" ;;
+    *)              log_warn "Runtime embedding backend = '$EMB_RUNTIME_BACKEND' (unknown)" ;;
+  esac
+else
+  EMB_REQS_BEFORE=""
+  log_info "Embeddings: /api/embeddings/stats not exposed (older server build)"
+fi
 
 # ============================================================
 # TEST 3: NPU Embedding Service (OVMS)
@@ -215,16 +272,19 @@ log_step "TEST 6 — Document Ingestion"
 
 # Ingest document 1: Transformer Architecture
 DOC1_ID="e2e-test-transformer-$$"
+DOC1_NPU_BEFORE=$(npu_busy); DOC1_T0=$(now_ms)
 DOC1_RESPONSE=$(http_post "$BASE_URL/api/documents" "{
   \"id\": \"$DOC1_ID\",
   \"title\": \"Transformer Architecture\",
   \"content\": \"The Transformer architecture, introduced by Vaswani et al. in 2017, revolutionized natural language processing by replacing recurrent neural networks with self-attention mechanisms. This architecture became the foundation for BERT, GPT, and subsequent large language models. The key insight was that attention allows the model to focus on relevant parts of the input sequence regardless of their distance, enabling parallel computation and better long-range dependency modeling. Multi-head attention further improved this by allowing the model to attend to different representations simultaneously. Self-attention computes pairwise interactions between all positions in the sequence, enabling the model to capture long-range dependencies that are difficult for recurrent architectures.\"
 }" 2>&1)
+DOC1_T1=$(now_ms); DOC1_NPU_AFTER=$(npu_busy)
 
 if [ -n "${DOC1_RESPONSE}" ] && echo "$DOC1_RESPONSE" | grep -q '"success":true'; then
   log_pass "Document 1 ingested (Transformer)"
   DOC1_DOCID=$(echo "$DOC1_RESPONSE" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).documentId)" 2>/dev/null)
   log_info "  Document ID: $DOC1_DOCID"
+  log_info "  Perf: $(fmt_call_perf "$DOC1_NPU_BEFORE" "$DOC1_NPU_AFTER" "$DOC1_T0" "$DOC1_T1")"
 else
   log_fail "Document 1 ingestion failed: $DOC1_RESPONSE"
 fi
@@ -233,18 +293,31 @@ sleep 1
 
 # Ingest document 2: Large Language Models
 DOC2_ID="e2e-test-llm-$$"
+DOC2_NPU_BEFORE=$(npu_busy); DOC2_T0=$(now_ms)
 DOC2_RESPONSE=$(http_post "$BASE_URL/api/documents" "{
   \"id\": \"$DOC2_ID\",
   \"title\": \"Large Language Models Survey\",
   \"content\": \"Large Language Models (LLMs) like GPT-4, Claude, and Llama have demonstrated remarkable capabilities across diverse tasks. These models are trained on massive text corpora using autoregressive next-token prediction. Key techniques include attention mechanisms, residual connections, layer normalization, and massive parallel training on GPU clusters. The scaling laws discovered by Kaplan et al. show that model performance improves predictably with compute, data, and parameter count. Recent advances include mixture-of-experts architectures, which activate only a subset of parameters per token, enabling larger models at lower inference cost. Retrieval Augmented Generation (RAG) combines LLMs with external knowledge bases to reduce hallucination and improve factual accuracy. Graph-based RAG systems further enhance this by building knowledge graphs from documents and using graph traversal for retrieval.\"
 }" 2>&1)
+DOC2_T1=$(now_ms); DOC2_NPU_AFTER=$(npu_busy)
 
 if [ -n "${DOC2_RESPONSE}" ] && echo "$DOC2_RESPONSE" | grep -q '"success":true'; then
   log_pass "Document 2 ingested (LLM Survey)"
   DOC2_DOCID=$(echo "$DOC2_RESPONSE" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).documentId)" 2>/dev/null)
   log_info "  Document ID: $DOC2_DOCID"
+  log_info "  Perf: $(fmt_call_perf "$DOC2_NPU_BEFORE" "$DOC2_NPU_AFTER" "$DOC2_T0" "$DOC2_T1")"
 else
   log_fail "Document 2 ingestion failed: $DOC2_RESPONSE"
+fi
+
+# Show the embedding-service request counter delta to confirm both
+# ingests went through the runtime EmbeddingService (and not, e.g., a
+# Qdrant-only fast path that would skip embedding entirely).
+EMB_STATS_AFTER_INGEST=$(embed_source)
+if [ -n "$EMB_STATS_AFTER_INGEST" ] && [ -n "$EMB_REQS_BEFORE" ]; then
+  EMB_REQS_AFTER=$(jq_field "$EMB_STATS_AFTER_INGEST" "stats.total_requests")
+  EMB_DELTA=$(( EMB_REQS_AFTER - EMB_REQS_BEFORE ))
+  log_info "EmbeddingService total_requests delta after ingest: +$EMB_DELTA"
 fi
 
 # Verify documents are in Qdrant
@@ -303,13 +376,16 @@ log_step "TEST 8 — Query"
 if [ -n "$ENTITY_COUNT" ] && [ "$ENTITY_COUNT" -gt 0 ] 2>/dev/null; then
   # Server expects `query`, not `question` (graphrag-server's QueryRequest
   # struct — different from /api/graph/build which takes free-form input).
+  Q_NPU_BEFORE=$(npu_busy); Q_T0=$(now_ms)
   QUERY_RESPONSE=$(http_post "$BASE_URL/api/query" '{
     "query": "What is the Transformer architecture and how does it relate to attention?",
     "top_k": 5
   }' 2>&1)
+  Q_T1=$(now_ms); Q_NPU_AFTER=$(npu_busy)
 
   if [ -n "${QUERY_RESPONSE}" ]; then
     log_pass "Query endpoint responds"
+    log_info "  Perf: $(fmt_call_perf "$Q_NPU_BEFORE" "$Q_NPU_AFTER" "$Q_T0" "$Q_T1")"
     if [ "$VERBOSE" = true ]; then
       echo "$QUERY_RESPONSE" | head -50
     fi

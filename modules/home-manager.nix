@@ -118,12 +118,16 @@ in
     };
 
     # ---------- Startup embedding backend (env-var driven) ----------
-    # graphrag-server's startup EmbeddingService only recognizes "hash" or
-    # "ollama" (graphrag-server/src/embeddings.rs). Upstream's "openai" /
-    # "voyage" / etc. config branches are not actually wired into the
-    # runtime pipeline — they parse and validate but silently fall back
-    # to hash. NPU embeddings work via "ollama" pointed at an
-    # Ollama→OVMS shim (TODO.md).
+    # The openai-compat fork wires graphrag-server/src/embeddings.rs's
+    # EmbeddingService to talk OpenAI-compat /embeddings against any
+    # backend (vLLM, OVMS, llama-server, real OpenAI). /api/documents
+    # and /api/query both go through this path; NPU via OVMS is the
+    # default in this flake. Hit GET /api/embeddings/stats to confirm
+    # the live runtime backend at any time. (Note: graphrag-core's
+    # *internal* embedding generator — the one /config returns under
+    # config.embeddings — is a separate, hash-only path; it's used by
+    # entity-vector storage during graph build, not by the user-facing
+    # embedding flow.)
     embedding = {
       backend = lib.mkOption {
         type = lib.types.enum [ "hash" "ollama" "openai" ];
