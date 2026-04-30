@@ -943,6 +943,120 @@ if echo "$QDRANT_COLLS" | grep -q "graphrag-relationships"; then
   log_info "graphrag-relationships holds $R_COUNT relationships"
 fi
 
+# Phase H+ (entity-description embeddings): Assert that the entity
+# sidecar carries REAL description embeddings, not the 1-D placeholder
+# the earlier draft used. The signal we want:
+#   1. Vector dim > 1  (was 1 in the placeholder version)
+#   2. Vector dim matches the document collection's dim (so entity
+#      and document searches live in the same embedding space)
+#   3. Vector values are non-zero (not the all-zero fallback used
+#      when the EmbeddingService fails)
+#   4. Vector self-search round-trips: searching by an entity's own
+#      vector should return that entity as the top hit with score≈1.
+# Skip-as-warn when the entity collection is empty (no build has run).
+if [ "${E_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+  E_DIM=$($CURL -sf "$QDRANT_URL/collections/graphrag-entities" 2>/dev/null | $NODE -e "
+    try {
+      const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+      const cfg = r.result?.config?.params?.vectors;
+      // Qdrant returns either {size, distance} or {<name>: {size, distance}}
+      const size = cfg?.size ?? Object.values(cfg || {})[0]?.size;
+      console.log(size ?? '?');
+    } catch (e) { console.log('?'); }
+  " 2>/dev/null)
+  DOC_DIM=$($CURL -sf "$QDRANT_URL/collections/graphrag" 2>/dev/null | $NODE -e "
+    try {
+      const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+      const cfg = r.result?.config?.params?.vectors;
+      const size = cfg?.size ?? Object.values(cfg || {})[0]?.size;
+      console.log(size ?? '?');
+    } catch (e) { console.log('?'); }
+  " 2>/dev/null)
+
+  if [ "$E_DIM" = "?" ]; then
+    log_warn "could not read graphrag-entities vector dim from Qdrant"
+  elif [ "${E_DIM}" -le 1 ] 2>/dev/null; then
+    log_fail "graphrag-entities vector dim is $E_DIM — placeholder vectors. Phase H+ persistence not wired."
+  else
+    log_pass "graphrag-entities vectors are real (dim=$E_DIM)"
+    if [ "$E_DIM" = "$DOC_DIM" ]; then
+      log_pass "entity dim matches document dim ($E_DIM == $DOC_DIM) — same embedding space"
+    else
+      log_warn "entity dim ($E_DIM) ≠ document dim ($DOC_DIM); cross-collection comparison won't work"
+    fi
+  fi
+
+  # Pull one entity point with its vector, check non-zero values.
+  E_POINT=$($CURL -sf -X POST "$QDRANT_URL/collections/graphrag-entities/points/scroll" \
+    -H 'Content-Type: application/json' \
+    -d '{"limit":1,"with_payload":true,"with_vector":true}' 2>/dev/null)
+  E_NONZERO=$(echo "$E_POINT" | $NODE -e "
+    try {
+      const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+      const pt = r.result?.points?.[0];
+      const vec = pt?.vector;
+      const arr = Array.isArray(vec) ? vec : Object.values(vec || {})[0];
+      if (!Array.isArray(arr) || arr.length === 0) { console.log('NO-VEC'); return; }
+      const sumAbs = arr.reduce((a, b) => a + Math.abs(b), 0);
+      const name = pt?.payload?.name ?? '?';
+      console.log(\`name=\${name} dim=\${arr.length} sum_abs=\${sumAbs.toFixed(3)}\`);
+    } catch (e) { console.log('PARSE-FAIL'); }
+  " 2>/dev/null)
+  if echo "$E_NONZERO" | grep -q "sum_abs="; then
+    SUM_ABS=$(echo "$E_NONZERO" | sed 's/.*sum_abs=//; s/[^0-9.].*//')
+    # Use awk for float comparison (bash can't compare 0.001 to 0.0)
+    IS_NONZERO=$(echo "$SUM_ABS" | awk '{print ($1 > 0.001) ? 1 : 0}')
+    if [ "$IS_NONZERO" = "1" ]; then
+      log_pass "sample entity vector is non-zero ($E_NONZERO)"
+    else
+      log_fail "sample entity vector is all-zero ($E_NONZERO) — embeddings fell back to zero-fill (EmbeddingService failure?)"
+    fi
+  else
+    log_warn "could not extract sample entity vector ($E_NONZERO)"
+  fi
+
+  # Vector self-search: take an entity's vector and search the same
+  # collection with it. Top hit should be that same entity (cosine≈1.0).
+  # This is the readiness check for "wire entity-vector-search into
+  # /api/query" — if this round-trips, the substrate is ready.
+  E_VECTOR_JSON=$(echo "$E_POINT" | $NODE -e "
+    try {
+      const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+      const pt = r.result?.points?.[0];
+      const vec = pt?.vector;
+      const arr = Array.isArray(vec) ? vec : Object.values(vec || {})[0];
+      console.log(JSON.stringify({ vector: arr, expected_name: pt?.payload?.name ?? '' }));
+    } catch (e) { console.log(''); }
+  " 2>/dev/null)
+  if [ -n "$E_VECTOR_JSON" ] && echo "$E_VECTOR_JSON" | grep -q '"vector"'; then
+    EXPECTED_NAME=$(echo "$E_VECTOR_JSON" | $NODE -e "
+      console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).expected_name);
+    " 2>/dev/null)
+    SEARCH_BODY=$(echo "$E_VECTOR_JSON" | $NODE -e "
+      const o = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+      console.log(JSON.stringify({ vector: o.vector, limit: 1, with_payload: true }));
+    " 2>/dev/null)
+    SEARCH_RESP=$($CURL -sf -X POST "$QDRANT_URL/collections/graphrag-entities/points/search" \
+      -H 'Content-Type: application/json' -d "$SEARCH_BODY" 2>/dev/null)
+    SEARCH_TOP=$(echo "$SEARCH_RESP" | $NODE -e "
+      try {
+        const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        const top = r.result?.[0];
+        console.log(\`name=\${top?.payload?.name ?? '?'} score=\${top?.score ?? '?'}\`);
+      } catch (e) { console.log('PARSE-FAIL'); }
+    " 2>/dev/null)
+    if echo "$SEARCH_TOP" | grep -q "name=$EXPECTED_NAME"; then
+      log_pass "entity vector self-search round-trips: $SEARCH_TOP (substrate ready for entity-vector-search retrieval)"
+    else
+      log_fail "entity vector self-search broken — expected name=$EXPECTED_NAME, got $SEARCH_TOP"
+    fi
+  else
+    log_warn "skipping vector self-search — could not extract sample vector"
+  fi
+else
+  log_info "Skipping entity-vector checks (graphrag-entities is empty)"
+fi
+
 # ============================================================
 # SUMMARY
 # ============================================================
