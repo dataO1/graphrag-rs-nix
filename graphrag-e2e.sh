@@ -595,13 +595,12 @@ else
     '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"graph_stats","arguments":{}}}' \
     '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_documents","arguments":{}}}' \
     "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"add_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\",\"title\":\"MCP Test Doc\",\"content\":\"Diffusion models like DDPM and DDIM denoise latent images iteratively. Stable Diffusion uses a U-Net backbone.\"}}}" \
-    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"query","arguments":{"question":"diffusion model","max_results":3}}}' \
-    '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"query_explain","arguments":{"question":"What is a Transformer?","max_results":3}}}' \
-    '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"query_local","arguments":{"question":"What is a Transformer?","max_results":5}}}' \
-    '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"query_global","arguments":{"question":"What are the major themes around language models in my notes?","max_results":5}}}' \
-    '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"query_hybrid","arguments":{"question":"How do Transformers relate to attention mechanisms?","max_results":5}}}' \
-    '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"query_mix","arguments":{"question":"Summarize what I know about deep learning architectures.","max_results":5}}}' \
-    '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"query_reason","arguments":{"question":"How do Transformers and diffusion models differ in their use of attention?","max_results":3}}}' \
+    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"query","arguments":{"question":"diffusion model","mode":"simple","max_results":3}}}' \
+    '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"query","arguments":{"question":"What is a Transformer?","mode":"default","max_results":3}}}' \
+    '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"query","arguments":{"question":"What is a Transformer?","mode":"local","max_results":5}}}' \
+    '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"query","arguments":{"question":"How do Transformers relate to attention mechanisms?","mode":"default","max_results":5}}}' \
+    '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"query","arguments":{"question":"Summarize what I know about deep learning architectures.","mode":"thorough","max_results":5}}}' \
+    '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"query","arguments":{"question":"How do Transformers and diffusion models differ in their use of attention?","reason":true,"max_results":3}}}' \
     "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\"}}}" \
     | GRAPHRAG_BASE_URL="$BASE_URL" timeout 180 "$MCP_BIN" 2>/dev/null)
 
@@ -649,11 +648,11 @@ else
     R2=$(mcp_resp 2)
     TOOL_COUNT=$(mcp_tools_count "$R2")
     TOOL_NAMES=$(mcp_tools_names "$R2")
-    if [ "${TOOL_COUNT:-0}" -ge 13 ] 2>/dev/null; then
+    if [ "${TOOL_COUNT:-0}" -ge 7 ] 2>/dev/null; then
       log_pass "tools/list advertises $TOOL_COUNT tools"
       log_info "  Tools: $TOOL_NAMES"
     else
-      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥13 — query, query_explain, query_local, query_global, query_hybrid, query_mix, query_reason, graph_stats, list_documents, add_document, delete_document, append_graph, build_graph)"
+      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥7 — query, graph_stats, list_documents, add_document, delete_document, append_graph, build_graph)"
     fi
 
     # 3 — tools/call graph_stats
@@ -689,10 +688,9 @@ else
       log_fail "tools/call add_document failed (isError=$(mcp_is_error "$R5"))"
     fi
 
-    # 6 — tools/call query (the bug the user just reported: 400 from
-    # backend because MCP was sending question/max_results instead of
-    # query/top_k). isError=false here means the field translation
-    # works end-to-end.
+    # 6 — tools/call query mode=simple (vector excerpts only, no LLM).
+    # Validates the field translation (question→query, max_results→top_k)
+    # and the agent-mode → server-mode mapping (simple → search).
     R6=$(mcp_resp 6)
     if [ "$(mcp_is_error "$R6")" = "false" ]; then
       Q_RESULTS=$(echo "$R6" | $NODE -e "
@@ -700,13 +698,13 @@ else
         const txt = r.result?.content?.[0]?.text ?? '';
         try { console.log((JSON.parse(txt).results || []).length); } catch (e) { console.log('?'); }
       " 2>/dev/null)
-      log_pass "tools/call query — got $Q_RESULTS results (translation question→query, max_results→top_k)"
+      log_pass "tools/call query mode=simple — got $Q_RESULTS results"
     else
       Q_ERR=$(echo "$R6" | $NODE -e "
         const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
         console.log(r.result?.content?.[0]?.text || JSON.stringify(r));
       " 2>/dev/null | head -c 200)
-      log_fail "tools/call query failed: $Q_ERR"
+      log_fail "tools/call query mode=simple failed: $Q_ERR"
     fi
 
     # 7 — tools/call delete_document (cleans up the doc we added)
@@ -717,59 +715,12 @@ else
       log_warn "tools/call delete_document failed (isError=$(mcp_is_error "$R7"))"
     fi
 
-    # 8 — tools/call query_explain (graph-aware answer + attribution).
-    # query_explain routes to mode=explain server-side. The metadata
-    # (confidence, keyEntities, reasoningSteps, sources) is computed
-    # from data already gathered for the answer — same compute cost
-    # as a metadata-less ask, so we only expose this rich variant.
-    R8=$(mcp_resp 8)
-    if [ "$(mcp_is_error "$R8")" = "false" ]; then
-      ASK_FIELDS=$(echo "$R8" | $NODE -e "
-        const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-        const txt = r.result?.content?.[0]?.text ?? '';
-        try {
-          const p = JSON.parse(txt);
-          const conf = (p.confidence ?? 'null');
-          const ke = (p.keyEntities || p.key_entities || []).length;
-          const rs = (p.reasoningSteps || p.reasoning_steps || []).length;
-          const sr = (p.sources || []).length;
-          const ans = (p.answer || '').slice(0, 80).replace(/\n/g, ' ');
-          console.log(\`confidence=\${conf} keyEntities=\${ke} reasoningSteps=\${rs} sources=\${sr} | answer: \${ans}\`);
-        } catch (e) { console.log('PARSE-FAIL'); }
-      " 2>/dev/null)
-      log_pass "tools/call query_explain — $ASK_FIELDS"
-    else
-      log_fail "tools/call query_explain failed (isError=$(mcp_is_error "$R8"))"
-    fi
-
-    # 11 — tools/call query_local (MS GraphRAG-style local_search;
-    #      entity-vector-seeded retrieval). This is the mode that
-    #      reads from the graphrag-entities sidecar. Skip-as-warn on
-    #      empty answer because a cold-start entity collection
-    #      legitimately gives no seeds.
-    R11=$(mcp_resp 11)
-    if [ "$(mcp_is_error "$R11")" = "false" ]; then
-      LOCAL_FIELDS=$(echo "$R11" | $NODE -e "
-        const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-        const txt = r.result?.content?.[0]?.text ?? '';
-        try {
-          const p = JSON.parse(txt);
-          const conf = (p.confidence ?? 'null');
-          const ke = (p.keyEntities || p.key_entities || []).length;
-          const rs = (p.reasoningSteps || p.reasoning_steps || []).length;
-          const sr = (p.sources || []).length;
-          const ans = (p.answer || '').slice(0, 80).replace(/\n/g, ' ');
-          const backend = p.backend || '?';
-          console.log(\`backend=\${backend} confidence=\${conf} keyEntities=\${ke} reasoningSteps=\${rs} sources=\${sr} | answer: \${ans}\`);
-        } catch (e) { console.log('PARSE-FAIL'); }
-      " 2>/dev/null)
-      log_pass "tools/call query_local — $LOCAL_FIELDS"
-    else
-      log_fail "tools/call query_local failed (isError=$(mcp_is_error "$R11"))"
-    fi
-
-    # Helper: parse a LightRAG-mode MCP response and report fields.
-    lightrag_fields() {
+    # Helper: parse a graph-aware MCP query response and report fields.
+    # All graph-aware modes (default/thorough/local) return the same
+    # explained-answer envelope (confidence, keyEntities, reasoningSteps,
+    # sources) — the metadata is free, computed from data already gathered
+    # for the answer.
+    query_fields() {
       echo "$1" | $NODE -e "
         const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
         const txt = r.result?.content?.[0]?.text ?? '';
@@ -781,9 +732,9 @@ else
           const sr = (p.sources || []).length;
           const ans = (p.answer || '').slice(0, 80).replace(/\n/g, ' ');
           const backend = p.backend || '?';
-          // The LightRAG dual-keyword extraction is captured as the
-          // first reasoning step (step=0 in the server impl). Pull
-          // it out so the test surfaces the actual keywords used.
+          // The LightRAG dual-keyword extraction is captured as a
+          // reasoning step on default/thorough modes. Surface it when
+          // present so the test shows which keywords drove retrieval.
           const steps = p.reasoningSteps || p.reasoning_steps || [];
           const kwStep = steps.find(s => /dual-keyword/i.test(s.description || ''));
           const kwLine = kwStep ? \` | \${kwStep.description.slice(0, 120)}\` : '';
@@ -792,31 +743,48 @@ else
       " 2>/dev/null
     }
 
-    # 12 — tools/call query_global (LightRAG global; relation-vector seeded).
-    R12=$(mcp_resp 12)
-    if [ "$(mcp_is_error "$R12")" = "false" ]; then
-      log_pass "tools/call query_global — $(lightrag_fields "$R12")"
+    # 8 — tools/call query mode=default (LightRAG hybrid; dual-keyword
+    # + both streams). Default agent-facing mode; LightRAG paper's
+    # recommended starting point.
+    R8=$(mcp_resp 8)
+    if [ "$(mcp_is_error "$R8")" = "false" ]; then
+      log_pass "tools/call query mode=default — $(query_fields "$R8")"
     else
-      log_fail "tools/call query_global failed (isError=$(mcp_is_error "$R12"))"
+      log_fail "tools/call query mode=default failed (isError=$(mcp_is_error "$R8"))"
     fi
 
-    # 13 — tools/call query_hybrid (LightRAG hybrid; dual-keyword + both streams).
+    # 11 — tools/call query mode=local (entity-vector-seeded retrieval).
+    # Reads from the graphrag-entities sidecar. Skip-as-warn on empty
+    # answer because a cold-start entity collection legitimately gives
+    # no seeds.
+    R11=$(mcp_resp 11)
+    if [ "$(mcp_is_error "$R11")" = "false" ]; then
+      log_pass "tools/call query mode=local — $(query_fields "$R11")"
+    else
+      log_fail "tools/call query mode=local failed (isError=$(mcp_is_error "$R11"))"
+    fi
+
+    # 13 — tools/call query mode=default again (different question,
+    # entity+thematic mix). Covers the path where dual-keyword
+    # extraction matters most.
     R13=$(mcp_resp 13)
     if [ "$(mcp_is_error "$R13")" = "false" ]; then
-      log_pass "tools/call query_hybrid — $(lightrag_fields "$R13")"
+      log_pass "tools/call query mode=default (alt) — $(query_fields "$R13")"
     else
-      log_fail "tools/call query_hybrid failed (isError=$(mcp_is_error "$R13"))"
+      log_fail "tools/call query mode=default (alt) failed (isError=$(mcp_is_error "$R13"))"
     fi
 
-    # 14 — tools/call query_mix (LightRAG mix; hybrid + chunk-vector).
+    # 14 — tools/call query mode=thorough (LightRAG mix; default + raw
+    # chunk-vector recall). Strongest recall mode; the escalation when
+    # default returns low confidence.
     R14=$(mcp_resp 14)
     if [ "$(mcp_is_error "$R14")" = "false" ]; then
-      log_pass "tools/call query_mix — $(lightrag_fields "$R14")"
+      log_pass "tools/call query mode=thorough — $(query_fields "$R14")"
     else
-      log_fail "tools/call query_mix failed (isError=$(mcp_is_error "$R14"))"
+      log_fail "tools/call query mode=thorough failed (isError=$(mcp_is_error "$R14"))"
     fi
 
-    # 10 — tools/call query_reason (multi-hop decomposition; slowest).
+    # 10 — tools/call query reason=true (multi-hop decomposition; slowest).
     R10=$(mcp_resp 10)
     if [ "$(mcp_is_error "$R10")" = "false" ]; then
       REASON_ANSWER=$(echo "$R10" | $NODE -e "
@@ -829,12 +797,12 @@ else
         } catch (e) { console.log('PARSE-FAIL'); }
       " 2>/dev/null)
       if [ "$REASON_ANSWER" = "EMPTY" ] || [ "$REASON_ANSWER" = "PARSE-FAIL" ]; then
-        log_warn "tools/call query_reason returned no answer (entity graph likely empty)"
+        log_warn "tools/call query reason=true returned no answer (entity graph likely empty)"
       else
-        log_pass "tools/call query_reason — answer: $REASON_ANSWER..."
+        log_pass "tools/call query reason=true — answer: $REASON_ANSWER..."
       fi
     else
-      log_fail "tools/call query_reason failed (isError=$(mcp_is_error "$R10"))"
+      log_fail "tools/call query reason=true failed (isError=$(mcp_is_error "$R10"))"
     fi
 
     # build_graph deliberately not invoked here — it's a 15-60s LLM
