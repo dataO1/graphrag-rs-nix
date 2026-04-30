@@ -161,12 +161,12 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "append_graph",
-                "description": "Run entity extraction on chunks added since the last build/append. THE RIGHT TOOL after a batch ingest: call `add_document` N times, then `append_graph` exactly once. Do NOT call after each individual add. Cheap fast-path no-op when nothing has changed since last run (returns immediately with documentCount=0) — safe to call defensively. Currently delegates to a full rebuild internally; LLM-call caching makes repeat work near-free, so cost scales with new content. Expect ~15-60s for a handful of fresh chunks on a local LLM.",
+                "description": "Run entity extraction on chunks added since the last build/append. A 30-minute cron timer already fires this automatically, so in steady state agents do NOT need to call it — newly-ingested documents become queryable through the graph-aware modes within ~30 min without intervention. Call manually only when (a) you just ingested content the user wants to query immediately and don't want to wait for the next cron tick, or (b) the user explicitly asks. Cheap fast-path no-op when nothing has changed (returns immediately with documentCount=0) — safe to call defensively. Real-extraction cost scales with new content: ~15-60s for a handful of fresh chunks on a local LLM. Always preferred over `build_graph` for incremental updates.",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "build_graph",
-                "description": "FULL rebuild of the entity/relationship graph from scratch. Expensive (15-60s + per chunk on a local LLM). Use `append_graph` instead in almost all cases. Reserve `build_graph` for: (1) cold-start — `graph_stats` shows documentCount > 0 but entityCount == 0; (2) recovery after a config change (entity_types, prompts) where you want to re-extract everything; (3) explicit user request. Never call after a routine ingest — that's what `append_graph` is for.",
+                "description": "[DEPRECATED FOR AGENTS — DO NOT CALL UNLESS THE USER EXPLICITLY ASKS.] Full LLM re-extraction over the entire corpus. Tens of seconds to minutes; no incremental savings. The server now persists the entity graph to Qdrant and rehydrates it on startup, AND a cron timer fires `append_graph` every 30 minutes to pick up new ingests, so agents never need to run a full build in normal operation. Only valid use cases: (a) the user explicitly asks for a rebuild, (b) recovery after a config change (entity_types, prompts, chat model swap) where you want to re-extract everything from scratch. For (a)/(b), confirm with the user first; this is not an action to take autonomously. Tool kept exposed for reference and emergency recovery.",
                 "inputSchema": { "type": "object", "properties": {} }
             }
         ]
