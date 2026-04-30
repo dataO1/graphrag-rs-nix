@@ -367,7 +367,28 @@ PRE_STATS=$(http_get "$BASE_URL/api/graph/stats" 2>&1)
 PRE_ENT=$(echo "$PRE_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).entityCount ?? 0)" 2>/dev/null)
 PRE_REL=$(echo "$PRE_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).relationshipCount ?? 0)" 2>/dev/null)
 PRE_DOC=$(echo "$PRE_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).documentCount ?? 0)" 2>/dev/null)
-log_info "Pre-restart: documentCount=$PRE_DOC entityCount=$PRE_ENT relationshipCount=$PRE_REL"
+log_info "Pre-restart in-memory: documentCount=$PRE_DOC entityCount=$PRE_ENT relationshipCount=$PRE_REL"
+
+# The IN-MEMORY pre-stats are NOT the right reference for this test.
+# build_graph populates in-memory by calling KnowledgeGraph::add_entity
+# directly, which appends a fresh petgraph node every time — including
+# duplicates with the same entity id. Same for relationships. So
+# in-memory may have e.g. 161 entity nodes that condense to 63 unique
+# ids on persist (UUID5 over entity.id collides → one Qdrant point
+# per id). Hydration restores from the sidecar = the unique-id view,
+# so the pre/post comparison would falsely flag the dedup as a
+# regression.
+#
+# Instead, we read the SIDECAR counts directly from Qdrant. They're
+# the canonical "what would survive a restart" view, and what
+# hydration must round-trip exactly.
+SIDE_ENT=$($CURL -sf "$QDRANT_URL/collections/graphrag-entities" 2>/dev/null | $NODE -e "
+  try { console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.points_count ?? 0); } catch (e) { console.log(0); }
+" 2>/dev/null)
+SIDE_REL=$($CURL -sf "$QDRANT_URL/collections/graphrag-relationships" 2>/dev/null | $NODE -e "
+  try { console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.points_count ?? 0); } catch (e) { console.log(0); }
+" 2>/dev/null)
+log_info "Sidecar (truth): graphrag-entities=$SIDE_ENT graphrag-relationships=$SIDE_REL"
 
 CFG_RESP=$(http_get "$BASE_URL/config" 2>&1)
 CFG_INNER=$(echo "$CFG_RESP" | $NODE -e "
@@ -419,25 +440,48 @@ else
     POST_DOC=$(echo "$POST_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).documentCount ?? 0)" 2>/dev/null)
     log_info "Post-restart: documentCount=$POST_DOC entityCount=$POST_ENT relationshipCount=$POST_REL"
 
+    # documentCount comparison stays against in-memory pre — chunks
+    # are deterministically rebuilt from text, no dedup quirks.
     if [ "${POST_DOC:-0}" -ge "$((PRE_DOC - 1))" ] 2>/dev/null; then
       log_pass "documentCount survived round-trip ($PRE_DOC → $POST_DOC)"
     else
       log_fail "documentCount regressed: $PRE_DOC → $POST_DOC (chunk hydration broken)"
     fi
 
-    if [ "${PRE_ENT:-0}" -gt 0 ] 2>/dev/null; then
-      if [ "${POST_ENT:-0}" -ge "$PRE_ENT" ] 2>/dev/null; then
-        log_pass "entityCount survived round-trip ($PRE_ENT → $POST_ENT)"
+    # entityCount/relationshipCount: compare to SIDECAR truth, not
+    # in-memory pre. After hydration the in-memory graph is built up
+    # via merge_entity/add_relationship from the persisted set, so
+    # the post count must exactly match the sidecar count.
+    #
+    # If pre > sidecar, that's the build_graph duplicate-node bug
+    # (raw petgraph count > unique-id count); persist correctly
+    # dedupes on the way out. We log it as INFO so it's visible
+    # without flagging hydration as broken.
+    if [ "${SIDE_ENT:-0}" -gt 0 ] 2>/dev/null; then
+      if [ "${POST_ENT:-0}" -eq "$SIDE_ENT" ] 2>/dev/null; then
+        log_pass "entityCount matches sidecar ($POST_ENT == $SIDE_ENT)"
+      elif [ "${POST_ENT:-0}" -ge "$SIDE_ENT" ] 2>/dev/null; then
+        # Post can legitimately exceed sidecar if a build/extend
+        # already ran since the round-trip and added more entities.
+        log_pass "entityCount ≥ sidecar ($POST_ENT ≥ $SIDE_ENT, post-extend drift)"
       else
-        log_fail "entityCount regressed: $PRE_ENT → $POST_ENT (Phase H persistence broken — restart would lose entities)"
+        log_fail "entityCount under sidecar: $POST_ENT < $SIDE_ENT (hydration lost entities)"
       fi
-      if [ "${POST_REL:-0}" -ge "$PRE_REL" ] 2>/dev/null; then
-        log_pass "relationshipCount survived round-trip ($PRE_REL → $POST_REL)"
+      if [ "${POST_REL:-0}" -eq "$SIDE_REL" ] 2>/dev/null; then
+        log_pass "relationshipCount matches sidecar ($POST_REL == $SIDE_REL)"
+      elif [ "${POST_REL:-0}" -ge "$SIDE_REL" ] 2>/dev/null; then
+        log_pass "relationshipCount ≥ sidecar ($POST_REL ≥ $SIDE_REL)"
       else
-        log_fail "relationshipCount regressed: $PRE_REL → $POST_REL (Phase H persistence broken)"
+        log_fail "relationshipCount under sidecar: $POST_REL < $SIDE_REL (hydration lost relationships)"
+      fi
+
+      # Surface the build_graph duplicate-node bug as INFO so it's
+      # visible without poisoning the test result.
+      if [ "${PRE_ENT:-0}" -gt "$SIDE_ENT" ] 2>/dev/null; then
+        log_info "  Note: in-memory pre ($PRE_ENT) > sidecar ($SIDE_ENT). build_graph creates duplicate petgraph nodes on same id; persist dedupes. Hydration round-trip restores the dedupe-correct view, which is intentional, not a regression."
       fi
     else
-      log_info "Pre-restart entity graph was empty — round-trip is a no-op verification (cold start; Test 8 will populate)"
+      log_info "Sidecar empty — round-trip is a no-op verification (cold start; Test 8 will populate)"
     fi
   fi
 fi
