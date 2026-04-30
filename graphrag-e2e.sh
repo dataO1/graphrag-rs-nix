@@ -598,6 +598,9 @@ else
     '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"query","arguments":{"question":"diffusion model","max_results":3}}}' \
     '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"query_explain","arguments":{"question":"What is a Transformer?","max_results":3}}}' \
     '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"query_local","arguments":{"question":"What is a Transformer?","max_results":5}}}' \
+    '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"query_global","arguments":{"question":"What are the major themes around language models in my notes?","max_results":5}}}' \
+    '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"query_hybrid","arguments":{"question":"How do Transformers relate to attention mechanisms?","max_results":5}}}' \
+    '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"query_mix","arguments":{"question":"Summarize what I know about deep learning architectures.","max_results":5}}}' \
     '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"query_reason","arguments":{"question":"How do Transformers and diffusion models differ in their use of attention?","max_results":3}}}' \
     "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\"}}}" \
     | GRAPHRAG_BASE_URL="$BASE_URL" timeout 180 "$MCP_BIN" 2>/dev/null)
@@ -646,11 +649,11 @@ else
     R2=$(mcp_resp 2)
     TOOL_COUNT=$(mcp_tools_count "$R2")
     TOOL_NAMES=$(mcp_tools_names "$R2")
-    if [ "${TOOL_COUNT:-0}" -ge 10 ] 2>/dev/null; then
+    if [ "${TOOL_COUNT:-0}" -ge 13 ] 2>/dev/null; then
       log_pass "tools/list advertises $TOOL_COUNT tools"
       log_info "  Tools: $TOOL_NAMES"
     else
-      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥10 — query, query_explain, query_local, query_reason, graph_stats, list_documents, add_document, delete_document, append_graph, build_graph)"
+      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥13 — query, query_explain, query_local, query_global, query_hybrid, query_mix, query_reason, graph_stats, list_documents, add_document, delete_document, append_graph, build_graph)"
     fi
 
     # 3 — tools/call graph_stats
@@ -763,6 +766,54 @@ else
       log_pass "tools/call query_local — $LOCAL_FIELDS"
     else
       log_fail "tools/call query_local failed (isError=$(mcp_is_error "$R11"))"
+    fi
+
+    # Helper: parse a LightRAG-mode MCP response and report fields.
+    lightrag_fields() {
+      echo "$1" | $NODE -e "
+        const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        const txt = r.result?.content?.[0]?.text ?? '';
+        try {
+          const p = JSON.parse(txt);
+          const conf = (p.confidence ?? 'null');
+          const ke = (p.keyEntities || p.key_entities || []).length;
+          const rs = (p.reasoningSteps || p.reasoning_steps || []).length;
+          const sr = (p.sources || []).length;
+          const ans = (p.answer || '').slice(0, 80).replace(/\n/g, ' ');
+          const backend = p.backend || '?';
+          // The LightRAG dual-keyword extraction is captured as the
+          // first reasoning step (step=0 in the server impl). Pull
+          // it out so the test surfaces the actual keywords used.
+          const steps = p.reasoningSteps || p.reasoning_steps || [];
+          const kwStep = steps.find(s => /dual-keyword/i.test(s.description || ''));
+          const kwLine = kwStep ? \` | \${kwStep.description.slice(0, 120)}\` : '';
+          console.log(\`backend=\${backend} confidence=\${conf} keyEntities=\${ke} reasoningSteps=\${rs} sources=\${sr}\${kwLine} | answer: \${ans}\`);
+        } catch (e) { console.log('PARSE-FAIL'); }
+      " 2>/dev/null
+    }
+
+    # 12 — tools/call query_global (LightRAG global; relation-vector seeded).
+    R12=$(mcp_resp 12)
+    if [ "$(mcp_is_error "$R12")" = "false" ]; then
+      log_pass "tools/call query_global — $(lightrag_fields "$R12")"
+    else
+      log_fail "tools/call query_global failed (isError=$(mcp_is_error "$R12"))"
+    fi
+
+    # 13 — tools/call query_hybrid (LightRAG hybrid; dual-keyword + both streams).
+    R13=$(mcp_resp 13)
+    if [ "$(mcp_is_error "$R13")" = "false" ]; then
+      log_pass "tools/call query_hybrid — $(lightrag_fields "$R13")"
+    else
+      log_fail "tools/call query_hybrid failed (isError=$(mcp_is_error "$R13"))"
+    fi
+
+    # 14 — tools/call query_mix (LightRAG mix; hybrid + chunk-vector).
+    R14=$(mcp_resp 14)
+    if [ "$(mcp_is_error "$R14")" = "false" ]; then
+      log_pass "tools/call query_mix — $(lightrag_fields "$R14")"
+    else
+      log_fail "tools/call query_mix failed (isError=$(mcp_is_error "$R14"))"
     fi
 
     # 10 — tools/call query_reason (multi-hop decomposition; slowest).
@@ -950,6 +1001,54 @@ else
   else
     log_fail "mode=local: wrong backend ($LOCAL_BACKEND); raw head: $(echo "$LOCAL_RESP" | head -c 200)"
   fi
+
+  # ===== LightRAG modes — mode=global / hybrid / mix ========================
+  # Each mode runs the LightRAG dual-keyword extraction (one extra LLM call)
+  # before retrieval. The first reasoning step in the response should
+  # document the extracted keywords — we surface that for debugging.
+  lightrag_test_mode() {
+    local mode="$1"
+    local question="$2"
+    local expected_backend="$3"
+    local t0 t1 resp backend ans fields head step0
+    t0=$(now_ms)
+    resp=$(http_post "$BASE_URL/api/query" "$(printf '{"query":%s,"top_k":5,"mode":"%s"}' "$(printf '%s' "$question" | $NODE -e 'console.log(JSON.stringify(require("fs").readFileSync(0,"utf8")))')" "$mode")" 2>&1)
+    t1=$(now_ms)
+    backend=$(echo "$resp" | $NODE -e "try { console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).backend ?? ''); } catch (e) { console.log(''); }" 2>/dev/null)
+    fields=$(echo "$resp" | $NODE -e "
+      try {
+        const p = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        const conf = p.confidence ?? 'null';
+        const ke = (p.keyEntities || []).length;
+        const rs = (p.reasoningSteps || []).length;
+        const sr = (p.sources || []).length;
+        const ans = (p.answer || '').length;
+        console.log(\`answer=\${ans}b confidence=\${conf} keyEntities=\${ke} reasoningSteps=\${rs} sources=\${sr}\`);
+      } catch (e) { console.log(''); }
+    " 2>/dev/null)
+    head=$(echo "$resp" | $NODE -e "
+      try { console.log((JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).answer || '').slice(0, 120).replace(/\n/g, ' ')); } catch (e) { console.log(''); }
+    " 2>/dev/null)
+    step0=$(echo "$resp" | $NODE -e "
+      try {
+        const steps = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).reasoningSteps || [];
+        const kw = steps.find(s => /dual-keyword/i.test(s.description || ''));
+        console.log((kw?.description || '').slice(0, 140).replace(/\n/g, ' '));
+      } catch (e) { console.log(''); }
+    " 2>/dev/null)
+    if [ "$backend" = "$expected_backend" ]; then
+      log_pass "mode=$mode returned answer (backend=$backend, $((t1 - t0))ms)"
+      [ -n "$fields" ] && log_info "  Fields: $fields"
+      [ -n "$step0" ] && log_info "  Keyword step: $step0"
+      [ -n "$head" ] && log_info "  Answer head: $head..."
+    else
+      log_fail "mode=$mode: wrong backend (got=$backend expected=$expected_backend); raw head: $(echo "$resp" | head -c 200)"
+    fi
+  }
+
+  lightrag_test_mode global "What are the major themes around language models in my notes?" "graphrag-lightrag-global"
+  lightrag_test_mode hybrid "How do Transformers relate to attention mechanisms?" "graphrag-lightrag-hybrid"
+  lightrag_test_mode mix    "Summarize what I know about deep learning architectures." "graphrag-lightrag-mix"
 fi
 
 # mode=search must still work (back-compat) — ensure the existing

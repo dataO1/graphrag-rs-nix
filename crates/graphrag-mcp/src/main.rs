@@ -105,12 +105,48 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "query_local",
-                "description": "Microsoft GraphRAG-style local_search. Embeds the user question, vector-searches the entity graph for top-K semantically-similar seed entities, expands those to their 1-hop neighbors via the relationship graph, and feeds an ENTITIES / RELATIONSHIPS / SOURCE TEXT context block to the chat backend. The most graph-aware mode — explicitly uses the entity vector index, not just chunk vectors. Pick this when the question is conceptually about specific named things in the user's notes (people, projects, products, ideas) and you want the answer grounded in entity-centric retrieval rather than chunk-centric. Returns the same attribution bundle as query_explain (confidence, key entities, reasoning steps, sources). Slower than `query` (~3-10s LLM round-trip) but the answer quality on entity-centric questions is typically higher than `query_explain`.",
+                "description": "LightRAG `local` / MS GraphRAG `local_search`. Embeds the user question, vector-searches the entity graph for top-K semantically-similar seed entities, expands those to their 1-hop neighbors via the relationship graph, and feeds an ENTITIES / RELATIONSHIPS / SOURCE TEXT context block to the chat backend. Entity-centric retrieval. Pick this when the question is conceptually about specific named things in the user's notes (people, projects, products, ideas). Returns confidence, key entities, reasoning steps, and sources. Slower than `query` (~3-10s LLM round-trip) but the answer quality on entity-centric questions is typically higher than `query_explain`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "question": { "type": "string", "description": "Natural-language question, ideally about specific entities (people, projects, ideas) in the user's notes." },
                         "max_results": { "type": "integer", "default": 8, "description": "Top-K seed entities pulled from the entity vector index. Each seed expands to up to 5 neighbors and their mentioning chunks." }
+                    },
+                    "required": ["question"]
+                }
+            },
+            {
+                "name": "query_global",
+                "description": "LightRAG `global` mode. Extracts dual-level keywords from the question (one LLM call), embeds the HIGH-LEVEL keyword set, vector-searches the *relationship* sidecar for seed relations, resolves their endpoint entities + neighborhoods, gathers chunks, asks the LLM. Theme-and-concept-centric retrieval — best for thematic / cross-cutting questions where the answer lives in the connections between ideas, not in any single entity ('what are the major themes', 'how do my notes about X relate to my notes about Y'). The right complement to `query_local` (entity-centric).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "Thematic / cross-cutting natural-language question." },
+                        "max_results": { "type": "integer", "default": 8, "description": "Top-K seed relations pulled from the relationship vector index." }
+                    },
+                    "required": ["question"]
+                }
+            },
+            {
+                "name": "query_hybrid",
+                "description": "LightRAG `hybrid` mode — the paper's recommended default. Single LLM call extracts low-level + high-level keywords; both retrieval streams run in parallel (low-level → entity sidecar; high-level → relationship sidecar); seed sets merge before context assembly and LLM synthesis. Best general-purpose graph-aware mode: gives entity-centric grounding from `query_local` AND thematic context from `query_global` in one answer. Pick this when you don't know whether the question is entity-centric or theme-centric, or when it's both. Cost: 2 LLM calls (keywords + answer), 2 embed calls, 2 Qdrant searches.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "Natural-language question — works for entity-centric, theme-centric, or mixed queries." },
+                        "max_results": { "type": "integer", "default": 8, "description": "Top-K per stream (entities AND relations)." }
+                    },
+                    "required": ["question"]
+                }
+            },
+            {
+                "name": "query_mix",
+                "description": "LightRAG `mix` mode — hybrid + raw chunk-vector recall. Extracts dual-level keywords AND runs a chunk-vector search on the original question. Three seed streams (entities + relations + chunks) all feed the LLM. Strongest recall mode; useful when you need maximum coverage and don't mind the extra latency (~5-10s vs ~4-7s for hybrid). Pick this if `query_hybrid` returned 'I don't have enough information' but you suspect the corpus does — the chunk-vector seeds catch passages that the entity/relation extraction missed.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "Natural-language question, especially for high-recall investigations." },
+                        "max_results": { "type": "integer", "default": 8, "description": "Top-K per stream (entities + relations + chunks)." }
                     },
                     "required": ["question"]
                 }
@@ -220,6 +256,33 @@ async fn call_tool(client: &Client, cfg: &Config, name: &str, args: &Value) -> R
                 "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
                 "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
                 "mode": "local",
+            });
+            let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
+            r.error_for_status()?.json::<Value>().await?
+        }
+        "query_global" => {
+            let body = json!({
+                "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
+                "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
+                "mode": "global",
+            });
+            let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
+            r.error_for_status()?.json::<Value>().await?
+        }
+        "query_hybrid" => {
+            let body = json!({
+                "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
+                "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
+                "mode": "hybrid",
+            });
+            let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
+            r.error_for_status()?.json::<Value>().await?
+        }
+        "query_mix" => {
+            let body = json!({
+                "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
+                "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
+                "mode": "mix",
             });
             let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
             r.error_for_status()?.json::<Value>().await?
