@@ -596,8 +596,7 @@ else
     '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_documents","arguments":{}}}' \
     "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"add_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\",\"title\":\"MCP Test Doc\",\"content\":\"Diffusion models like DDPM and DDIM denoise latent images iteratively. Stable Diffusion uses a U-Net backbone.\"}}}" \
     '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"query","arguments":{"question":"diffusion model","max_results":3}}}' \
-    '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"query_ask","arguments":{"question":"What is a diffusion model?","max_results":3}}}' \
-    '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"query_explain","arguments":{"question":"What is a Transformer?","max_results":3}}}' \
+    '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"query_explain","arguments":{"question":"What is a Transformer?","max_results":3}}}' \
     '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"query_reason","arguments":{"question":"How do Transformers and diffusion models differ in their use of attention?","max_results":3}}}' \
     "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\"}}}" \
     | GRAPHRAG_BASE_URL="$BASE_URL" timeout 180 "$MCP_BIN" 2>/dev/null)
@@ -646,11 +645,11 @@ else
     R2=$(mcp_resp 2)
     TOOL_COUNT=$(mcp_tools_count "$R2")
     TOOL_NAMES=$(mcp_tools_names "$R2")
-    if [ "${TOOL_COUNT:-0}" -ge 10 ] 2>/dev/null; then
+    if [ "${TOOL_COUNT:-0}" -ge 9 ] 2>/dev/null; then
       log_pass "tools/list advertises $TOOL_COUNT tools"
       log_info "  Tools: $TOOL_NAMES"
     else
-      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥10 — query, query_ask, query_explain, query_reason, graph_stats, list_documents, add_document, delete_document, append_graph, build_graph)"
+      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥9 — query, query_explain, query_reason, graph_stats, list_documents, add_document, delete_document, append_graph, build_graph)"
     fi
 
     # 3 — tools/call graph_stats
@@ -714,33 +713,14 @@ else
       log_warn "tools/call delete_document failed (isError=$(mcp_is_error "$R7"))"
     fi
 
-    # 8 — tools/call query_ask (graph-aware mode; LLM round-trip).
-    # Skipped-as-warn rather than failed if entity graph is empty — the
-    # tool itself still works, just returns a degenerate answer.
+    # 8 — tools/call query_explain (graph-aware answer + attribution).
+    # query_explain routes to mode=explain server-side. The metadata
+    # (confidence, keyEntities, reasoningSteps, sources) is computed
+    # from data already gathered for the answer — same compute cost
+    # as a metadata-less ask, so we only expose this rich variant.
     R8=$(mcp_resp 8)
     if [ "$(mcp_is_error "$R8")" = "false" ]; then
-      ASK_ANSWER=$(echo "$R8" | $NODE -e "
-        const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-        const txt = r.result?.content?.[0]?.text ?? '';
-        try {
-          const p = JSON.parse(txt);
-          const a = p.answer || '';
-          console.log(a.length > 0 ? a.slice(0, 80).replace(/\n/g, ' ') : 'EMPTY');
-        } catch (e) { console.log('PARSE-FAIL'); }
-      " 2>/dev/null)
-      if [ "$ASK_ANSWER" = "EMPTY" ] || [ "$ASK_ANSWER" = "PARSE-FAIL" ]; then
-        log_warn "tools/call query_ask returned no answer (entity graph likely empty)"
-      else
-        log_pass "tools/call query_ask — answer: $ASK_ANSWER..."
-      fi
-    else
-      log_fail "tools/call query_ask failed (isError=$(mcp_is_error "$R8"))"
-    fi
-
-    # 9 — tools/call query_explain (graph-aware + attribution).
-    R9=$(mcp_resp 9)
-    if [ "$(mcp_is_error "$R9")" = "false" ]; then
-      EXPLAIN_FIELDS=$(echo "$R9" | $NODE -e "
+      ASK_FIELDS=$(echo "$R8" | $NODE -e "
         const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
         const txt = r.result?.content?.[0]?.text ?? '';
         try {
@@ -753,9 +733,9 @@ else
           console.log(\`confidence=\${conf} keyEntities=\${ke} reasoningSteps=\${rs} sources=\${sr} | answer: \${ans}\`);
         } catch (e) { console.log('PARSE-FAIL'); }
       " 2>/dev/null)
-      log_pass "tools/call query_explain — $EXPLAIN_FIELDS"
+      log_pass "tools/call query_explain — $ASK_FIELDS"
     else
-      log_fail "tools/call query_explain failed (isError=$(mcp_is_error "$R9"))"
+      log_fail "tools/call query_explain failed (isError=$(mcp_is_error "$R8"))"
     fi
 
     # 10 — tools/call query_reason (multi-hop decomposition; slowest).

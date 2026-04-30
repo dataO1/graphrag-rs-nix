@@ -92,25 +92,13 @@ fn tool_definitions() -> Value {
                 }
             },
             {
-                "name": "query_ask",
-                "description": "Graph-aware retrieval + LLM-composed answer. Use when the user asks a question they want ANSWERED, not just sources. Walks the entity graph, ranks chunks/entities/relationships, then has the configured chat backend synthesize an answer. Slower than `query` (LLM round-trip; ~1-10s on local hardware). Pick this over plain `query` when the user wants a direct answer in natural language. Pick `query_explain` instead if the user asks 'why' or 'how do you know' — that returns confidence + sources too. Pick `query_reason` if the question has multiple sub-parts that need decomposition.",
+                "name": "query_explain",
+                "description": "Graph-aware retrieval + LLM-composed answer with attribution. Use when the user asks a question they want ANSWERED in natural language. Walks the entity graph, ranks chunks/entities/relationships, has the configured chat backend synthesize an answer, AND returns confidence (0-1), the key entities the answer relied on, a step-by-step reasoning trace, and a typed source list (text-chunk / entity / relationship). The metadata is computed from data already gathered for the answer — same compute cost as a metadata-less ask. Use `confidence` to gauge how grounded the answer is: <0.3 means the engine is guessing (surface uncertainty to the user); >0.7 means well-supported. Pick this for nearly every answer-seeking question. Pick `query_reason` instead only when the question has multiple sub-parts that need decomposition. Slower than plain `query` (LLM round-trip; ~3-10s on local hardware).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "question": { "type": "string", "description": "Natural-language question to answer." },
                         "max_results": { "type": "integer", "default": 8, "description": "Top-K source chunks the engine considers. Higher = more context for the LLM, slower call." }
-                    },
-                    "required": ["question"]
-                }
-            },
-            {
-                "name": "query_explain",
-                "description": "Graph-aware answer WITH attribution: confidence score (0-1), reasoning steps, key entities the answer relied on, and a typed source list (text-chunk / entity / relationship). Use when (a) the user asks 'why', 'how do you know', 'what are your sources', or (b) you want to audit whether an answer is well-grounded before relaying it, or (c) downstream code needs to display citations. More expensive than `query_ask` (extra retrieval + reasoning trace). The returned `confidence` is a useful signal: <0.3 means the engine is guessing — surface that to the user.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "question": { "type": "string", "description": "Natural-language question to answer with attribution." },
-                        "max_results": { "type": "integer", "default": 8, "description": "Top-K source chunks the engine considers." }
                     },
                     "required": ["question"]
                 }
@@ -189,16 +177,15 @@ async fn call_tool(client: &Client, cfg: &Config, name: &str, args: &Value) -> R
             let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
             r.error_for_status()?.json::<Value>().await?
         }
-        "query_ask" => {
-            let body = json!({
-                "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
-                "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
-                "mode": "ask",
-            });
-            let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
-            r.error_for_status()?.json::<Value>().await?
-        }
         "query_explain" => {
+            // Routes to /api/query mode=explain. graphrag-core's
+            // ask() and ask_explained() share the same retrieval +
+            // LLM call — the only difference is whether the
+            // already-computed metadata (confidence, sources,
+            // reasoning steps, key entities) is packaged in the
+            // response. Since the cost is identical, we expose only
+            // the metadata-rich variant as a single tool. Agents
+            // can ignore fields they don't need.
             let body = json!({
                 "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
                 "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
