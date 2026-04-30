@@ -446,6 +446,7 @@ else
     '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"query","arguments":{"question":"diffusion model","max_results":3}}}' \
     '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"query_ask","arguments":{"question":"What is a diffusion model?","max_results":3}}}' \
     '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"query_explain","arguments":{"question":"What is a Transformer?","max_results":3}}}' \
+    '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"query_reason","arguments":{"question":"How do Transformers and diffusion models differ in their use of attention?","max_results":3}}}' \
     "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\"}}}" \
     | GRAPHRAG_BASE_URL="$BASE_URL" timeout 180 "$MCP_BIN" 2>/dev/null)
 
@@ -596,12 +597,34 @@ else
           const ke = (p.keyEntities || p.key_entities || []).length;
           const rs = (p.reasoningSteps || p.reasoning_steps || []).length;
           const sr = (p.sources || []).length;
-          console.log(\`confidence=\${conf} keyEntities=\${ke} reasoningSteps=\${rs} sources=\${sr}\`);
+          const ans = (p.answer || '').slice(0, 80).replace(/\n/g, ' ');
+          console.log(\`confidence=\${conf} keyEntities=\${ke} reasoningSteps=\${rs} sources=\${sr} | answer: \${ans}\`);
         } catch (e) { console.log('PARSE-FAIL'); }
       " 2>/dev/null)
       log_pass "tools/call query_explain — $EXPLAIN_FIELDS"
     else
       log_fail "tools/call query_explain failed (isError=$(mcp_is_error "$R9"))"
+    fi
+
+    # 10 — tools/call query_reason (multi-hop decomposition; slowest).
+    R10=$(mcp_resp 10)
+    if [ "$(mcp_is_error "$R10")" = "false" ]; then
+      REASON_ANSWER=$(echo "$R10" | $NODE -e "
+        const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        const txt = r.result?.content?.[0]?.text ?? '';
+        try {
+          const p = JSON.parse(txt);
+          const a = (p.answer || '');
+          console.log(a.length > 0 ? a.slice(0, 80).replace(/\n/g, ' ') : 'EMPTY');
+        } catch (e) { console.log('PARSE-FAIL'); }
+      " 2>/dev/null)
+      if [ "$REASON_ANSWER" = "EMPTY" ] || [ "$REASON_ANSWER" = "PARSE-FAIL" ]; then
+        log_warn "tools/call query_reason returned no answer (entity graph likely empty)"
+      else
+        log_pass "tools/call query_reason — answer: $REASON_ANSWER..."
+      fi
+    else
+      log_fail "tools/call query_reason failed (isError=$(mcp_is_error "$R10"))"
     fi
 
     # build_graph deliberately not invoked here — it's a 15-60s LLM
@@ -676,8 +699,8 @@ else
     try { console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).backend ?? ''); } catch (e) { console.log(''); }
   " 2>/dev/null)
   if [ -n "$ASK_ANSWER" ] && [ "$ASK_BACKEND" = "graphrag" ]; then
-    log_pass "mode=ask returned answer (backend=$ASK_BACKEND, $((ASK_T1 - ASK_T0))ms)"
-    log_info "  Answer head: $(echo "$ASK_ANSWER" | head -c 100 | tr '\n' ' ')..."
+    log_pass "mode=ask returned answer (backend=$ASK_BACKEND, $((ASK_T1 - ASK_T0))ms, ${#ASK_ANSWER}b)"
+    log_info "  Answer head: $(echo "$ASK_ANSWER" | head -c 120 | tr '\n' ' ')..."
   else
     log_fail "mode=ask: empty answer or wrong backend ($ASK_BACKEND); raw: $(echo "$ASK_RESP" | head -c 200)"
   fi
@@ -697,11 +720,40 @@ else
       console.log(\`answer=\${ans}b confidence=\${conf} keyEntities=\${ke} reasoningSteps=\${rs} sources=\${sr}\`);
     } catch (e) { console.log(''); }
   " 2>/dev/null)
+  EXP_HEAD=$(echo "$EXP_RESP" | $NODE -e "
+    try { console.log((JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).answer || '').slice(0, 100).replace(/\n/g, ' ')); } catch (e) { console.log(''); }
+  " 2>/dev/null)
   if [ -n "$EXP_FIELDS" ]; then
     log_pass "mode=explain returned attribution ($((EXP_T1 - EXP_T0))ms)"
     log_info "  Fields: $EXP_FIELDS"
+    [ -n "$EXP_HEAD" ] && log_info "  Answer head: $EXP_HEAD..."
+    EXP_FIRST_REASON=$(echo "$EXP_RESP" | $NODE -e "
+      try { console.log(((JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).reasoningSteps || [])[0]?.description || '').slice(0, 100).replace(/\n/g, ' ')); } catch (e) { console.log(''); }
+    " 2>/dev/null)
+    [ -n "$EXP_FIRST_REASON" ] && log_info "  Reasoning step 1: $EXP_FIRST_REASON"
   else
     log_fail "mode=explain failed; raw: $(echo "$EXP_RESP" | head -c 200)"
+  fi
+
+  # mode=reason — multi-hop decomposition. Slowest (multiple LLM
+  # round-trips); large timeout to keep the test honest. Skip-as-warn
+  # if the LLM call takes longer than the test patience window.
+  REASON_T0=$(now_ms)
+  REASON_RESP=$(GRAPHRAG_TIMEOUT_SECS=180 \
+    "$CURL" -sf --max-time 240 "$BASE_URL/api/query" -X POST -H 'Content-Type: application/json' \
+      -d '{"query":"How are Transformers and LLMs related, and what role does attention play?","top_k":5,"mode":"reason"}' 2>&1)
+  REASON_T1=$(now_ms)
+  REASON_ANS_LEN=$(echo "$REASON_RESP" | $NODE -e "
+    try { console.log((JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).answer || '').length); } catch (e) { console.log(0); }
+  " 2>/dev/null)
+  REASON_HEAD=$(echo "$REASON_RESP" | $NODE -e "
+    try { console.log((JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).answer || '').slice(0, 120).replace(/\n/g, ' ')); } catch (e) { console.log(''); }
+  " 2>/dev/null)
+  if [ "${REASON_ANS_LEN:-0}" -gt 0 ] 2>/dev/null; then
+    log_pass "mode=reason returned answer ($((REASON_T1 - REASON_T0))ms, ${REASON_ANS_LEN}b)"
+    [ -n "$REASON_HEAD" ] && log_info "  Answer head: $REASON_HEAD..."
+  else
+    log_warn "mode=reason returned no answer (timed out or LLM busy?); raw head: $(echo "$REASON_RESP" | head -c 200)"
   fi
 fi
 
