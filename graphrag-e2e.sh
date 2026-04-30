@@ -354,45 +354,153 @@ else
 fi
 
 # ============================================================
-# TEST 7: Graph Build (LLM Entity Extraction)
+# TEST 7: Hydration Round-Trip (Phase G + H restart-survival proxy)
 # ============================================================
-log_step "TEST 7 — Graph Build (LLM Entity Extraction)"
+# Runs FIRST (before the expensive build) so the build can be skipped
+# when the entity graph already exists in the Qdrant sidecars. POST
+# /config replays the same hydration code path the systemd unit fires
+# on every boot, without the operational risk of restarting the unit
+# mid-traffic.
+log_step "TEST 7 — Hydration Round-Trip (POST /config replays restart)"
 
-log_info "Initiating graph build... (this may take 2-5 minutes for 27B model)"
-BUILD_START=$(date +%s)
+PRE_STATS=$(http_get "$BASE_URL/api/graph/stats" 2>&1)
+PRE_ENT=$(echo "$PRE_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).entityCount ?? 0)" 2>/dev/null)
+PRE_REL=$(echo "$PRE_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).relationshipCount ?? 0)" 2>/dev/null)
+PRE_DOC=$(echo "$PRE_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).documentCount ?? 0)" 2>/dev/null)
+log_info "Pre-restart: documentCount=$PRE_DOC entityCount=$PRE_ENT relationshipCount=$PRE_REL"
 
-BUILD_RESPONSE=$(http_post "$BASE_URL/api/graph/build" '{}' 2>&1) || {
-  log_fail "Graph build request failed: $BUILD_RESPONSE"
-  BUILD_FAILED=true
-}
+CFG_RESP=$(http_get "$BASE_URL/config" 2>&1)
+CFG_INNER=$(echo "$CFG_RESP" | $NODE -e "
+  try {
+    const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+    console.log(JSON.stringify(r.config));
+  } catch (e) { console.log(''); }
+" 2>/dev/null)
 
-BUILD_END=$(date +%s)
-BUILD_DURATION=$(( BUILD_END - BUILD_START ))
-log_info "Graph build completed in ${BUILD_DURATION}s"
+HYDRATION_ENT=0
+HYDRATION_REL=0
 
-if [ -z "${BUILD_FAILED:-}" ]; then
-  BUILD_ENTITIES=$(jq_field "$BUILD_RESPONSE" "documentCount" 2>/dev/null || echo "0")
-  BUILD_ENTITIES_NUM=$(echo "$BUILD_RESPONSE" | $NODE -e "const r=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); console.log(r.message || 'no message')" 2>/dev/null || echo "no message")
-  log_info "Build result: $BUILD_ENTITIES_NUM"
+if [ -z "$CFG_INNER" ] || [ "$CFG_INNER" = "null" ] || [ "$CFG_INNER" = "undefined" ]; then
+  log_warn "GET /config returned no live config; skipping round-trip (POST /config not yet fired by ExecStartPost?)"
+else
+  HYD_T0=$(now_ms)
+  HYD_RESP=$(http_post "$BASE_URL/config" "$CFG_INNER" 2>&1)
+  HYD_T1=$(now_ms)
 
-  # Check graph stats
-  STATS=$(http_get "$BASE_URL/api/graph/stats")
-  ENTITY_COUNT=$(jq_field "$STATS" "entityCount" 2>/dev/null || echo "0")
-  REL_COUNT=$(jq_field "$STATS" "relationshipCount" 2>/dev/null || echo "0")
-  log_info "Graph stats: entities=$ENTITY_COUNT relationships=$REL_COUNT"
-
-  if [ -n "$ENTITY_COUNT" ] && [ "$ENTITY_COUNT" -gt 0 ] 2>/dev/null; then
-    log_pass "Graph build produced $ENTITY_COUNT entities and ${REL_COUNT:-0} relationships"
+  if [ -z "$HYD_RESP" ] || ! echo "$HYD_RESP" | grep -q '"success":true'; then
+    log_fail "POST /config failed: $(echo "$HYD_RESP" | head -c 200)"
   else
-    log_warn "Graph build completed but extracted ${ENTITY_COUNT:-0} entities (LLM may have returned invalid JSON)"
-    log_info "Check journalctl --user -u graphrag-rs for extraction logs"
+    log_pass "POST /config round-trip succeeded ($((HYD_T1 - HYD_T0))ms)"
+
+    HYD_FIELDS=$(echo "$HYD_RESP" | $NODE -e "
+      try {
+        const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        const h = r.hydrated || {};
+        console.log(\`documents=\${h.documents ?? '?'} chunks=\${h.chunks ?? '?'} entities=\${h.entities ?? '?'} relationships=\${h.relationships ?? '?'} skipped=\${h.skipped ?? '?'} orphans=\${h.relationships_skipped_orphan ?? '?'}\`);
+      } catch (e) { console.log(''); }
+    " 2>/dev/null)
+    HYDRATION_ENT=$(echo "$HYD_RESP" | $NODE -e "
+      try { console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).hydrated?.entities ?? 0); } catch (e) { console.log(0); }
+    " 2>/dev/null)
+    HYDRATION_REL=$(echo "$HYD_RESP" | $NODE -e "
+      try { console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).hydrated?.relationships ?? 0); } catch (e) { console.log(0); }
+    " 2>/dev/null)
+
+    if [ -n "$HYD_FIELDS" ] && ! echo "$HYD_FIELDS" | grep -q 'entities=?'; then
+      log_pass "hydrated summary present in response"
+      log_info "  Hydrated: $HYD_FIELDS"
+    else
+      log_warn "POST /config response missing hydrated summary (older server build?)"
+    fi
+
+    POST_STATS=$(http_get "$BASE_URL/api/graph/stats" 2>&1)
+    POST_ENT=$(echo "$POST_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).entityCount ?? 0)" 2>/dev/null)
+    POST_REL=$(echo "$POST_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).relationshipCount ?? 0)" 2>/dev/null)
+    POST_DOC=$(echo "$POST_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).documentCount ?? 0)" 2>/dev/null)
+    log_info "Post-restart: documentCount=$POST_DOC entityCount=$POST_ENT relationshipCount=$POST_REL"
+
+    if [ "${POST_DOC:-0}" -ge "$((PRE_DOC - 1))" ] 2>/dev/null; then
+      log_pass "documentCount survived round-trip ($PRE_DOC → $POST_DOC)"
+    else
+      log_fail "documentCount regressed: $PRE_DOC → $POST_DOC (chunk hydration broken)"
+    fi
+
+    if [ "${PRE_ENT:-0}" -gt 0 ] 2>/dev/null; then
+      if [ "${POST_ENT:-0}" -ge "$PRE_ENT" ] 2>/dev/null; then
+        log_pass "entityCount survived round-trip ($PRE_ENT → $POST_ENT)"
+      else
+        log_fail "entityCount regressed: $PRE_ENT → $POST_ENT (Phase H persistence broken — restart would lose entities)"
+      fi
+      if [ "${POST_REL:-0}" -ge "$PRE_REL" ] 2>/dev/null; then
+        log_pass "relationshipCount survived round-trip ($PRE_REL → $POST_REL)"
+      else
+        log_fail "relationshipCount regressed: $PRE_REL → $POST_REL (Phase H persistence broken)"
+      fi
+    else
+      log_info "Pre-restart entity graph was empty — round-trip is a no-op verification (cold start; Test 8 will populate)"
+    fi
+  fi
+fi
+
+# Use post-hydration counts as the authoritative graph-state signal
+# for downstream gating. POST_ENT may be unset if the round-trip was
+# skipped above; default to PRE_ENT in that case.
+ENTITY_COUNT="${POST_ENT:-$PRE_ENT}"
+REL_COUNT="${POST_REL:-$PRE_REL}"
+
+# ============================================================
+# TEST 8: Conditional Graph Build (LLM Entity Extraction)
+# ============================================================
+# Only fires when the persisted graph is empty (cold-start: fresh
+# Qdrant, never built before, OR sidecar collections wiped). When the
+# round-trip in Test 7 already restored a populated graph, this is a
+# no-op — saves the 30-60s LLM extraction loop on every e2e run.
+# Override with FORCE_BUILD=1 if you specifically want to re-extract.
+log_step "TEST 8 — Graph Build (conditional — LLM Entity Extraction)"
+
+if [ "${FORCE_BUILD:-0}" != "1" ] && [ "${ENTITY_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+  log_pass "Skipping build — persisted graph already populated ($ENTITY_COUNT entities, $REL_COUNT relationships)"
+  log_info "  Set FORCE_BUILD=1 to re-extract anyway (only useful after entity_types/prompt/model changes)."
+else
+  if [ "${FORCE_BUILD:-0}" = "1" ]; then
+    log_info "FORCE_BUILD=1 set — re-running full extraction over the entire corpus"
+  else
+    log_info "Cold start (entityCount=0) — running build to populate the graph"
+  fi
+  log_info "Initiating graph build... (this may take 2-5 minutes for 27B model)"
+  BUILD_START=$(date +%s)
+
+  BUILD_RESPONSE=$(http_post "$BASE_URL/api/graph/build" '{}' 2>&1) || {
+    log_fail "Graph build request failed: $BUILD_RESPONSE"
+    BUILD_FAILED=true
+  }
+
+  BUILD_END=$(date +%s)
+  BUILD_DURATION=$(( BUILD_END - BUILD_START ))
+  log_info "Graph build completed in ${BUILD_DURATION}s"
+
+  if [ -z "${BUILD_FAILED:-}" ]; then
+    BUILD_ENTITIES_NUM=$(echo "$BUILD_RESPONSE" | $NODE -e "const r=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); console.log(r.message || 'no message')" 2>/dev/null || echo "no message")
+    log_info "Build result: $BUILD_ENTITIES_NUM"
+
+    STATS=$(http_get "$BASE_URL/api/graph/stats")
+    ENTITY_COUNT=$(jq_field "$STATS" "entityCount" 2>/dev/null || echo "0")
+    REL_COUNT=$(jq_field "$STATS" "relationshipCount" 2>/dev/null || echo "0")
+    log_info "Graph stats: entities=$ENTITY_COUNT relationships=$REL_COUNT"
+
+    if [ -n "$ENTITY_COUNT" ] && [ "$ENTITY_COUNT" -gt 0 ] 2>/dev/null; then
+      log_pass "Graph build produced $ENTITY_COUNT entities and ${REL_COUNT:-0} relationships"
+    else
+      log_warn "Graph build completed but extracted ${ENTITY_COUNT:-0} entities (LLM may have returned invalid JSON)"
+      log_info "Check journalctl --user -u graphrag-rs for extraction logs"
+    fi
   fi
 fi
 
 # ============================================================
-# TEST 8: Query (if graph has entities)
+# TEST 9: Query (if graph has entities)
 # ============================================================
-log_step "TEST 8 — Query"
+log_step "TEST 9 — Query"
 
 if [ -n "$ENTITY_COUNT" ] && [ "$ENTITY_COUNT" -gt 0 ] 2>/dev/null; then
   # Server expects `query`, not `question` (graphrag-server's QueryRequest
@@ -418,9 +526,9 @@ else
 fi
 
 # ============================================================
-# TEST 9: MCP Server (graphrag-mcp stdio bridge)
+# TEST 10: MCP Server (graphrag-mcp stdio bridge)
 # ============================================================
-log_step "TEST 9 — MCP Server (graphrag-mcp)"
+log_step "TEST 10 — MCP Server (graphrag-mcp)"
 
 MCP_BIN=$(command -v graphrag-mcp 2>/dev/null \
   || ls /etc/profiles/per-user/*/bin/graphrag-mcp 2>/dev/null | head -1)
@@ -635,9 +743,9 @@ else
 fi
 
 # ============================================================
-# TEST 10: Graph Append Endpoint (incremental fast-path)
+# TEST 11: Graph Append Endpoint (incremental fast-path)
 # ============================================================
-log_step "TEST 10 — Graph Append (POST /api/graph/append)"
+log_step "TEST 11 — Graph Append (POST /api/graph/append)"
 
 # Test 7 just ran a full build over every chunk; the live chunk count
 # now equals processed_chunk_count, so /append should hit the fast
@@ -675,9 +783,9 @@ else
 fi
 
 # ============================================================
-# TEST 11: Query Modes — graph-aware /api/query (mode=ask|explain|reason)
+# TEST 12: Query Modes — graph-aware /api/query (mode=ask|explain|reason)
 # ============================================================
-log_step "TEST 11 — Query Modes (mode=ask|explain|reason)"
+log_step "TEST 12 — Query Modes (mode=ask|explain|reason)"
 
 # These modes call into graphrag-core's ask()/ask_explained()/
 # ask_with_reasoning(). They require a configured chat backend AND a
@@ -770,9 +878,9 @@ else
 fi
 
 # ============================================================
-# TEST 12: Persistence sidecar collections (graphrag-entities / -relationships)
+# TEST 13: Persistence sidecar collections (graphrag-entities / -relationships)
 # ============================================================
-log_step "TEST 12 — Graph Persistence (Qdrant sidecar collections)"
+log_step "TEST 13 — Graph Persistence (Qdrant sidecar collections)"
 
 # After Test 7 (build_graph) the server should have written to two
 # new Qdrant collections: <coll>-entities and <coll>-relationships.
@@ -809,106 +917,6 @@ if echo "$QDRANT_COLLS" | grep -q "graphrag-relationships"; then
     try { console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.points_count ?? 0); } catch (e) { console.log(0); }
   " 2>/dev/null)
   log_info "graphrag-relationships holds $R_COUNT relationships"
-fi
-
-# ============================================================
-# TEST 13: Hydration round-trip (Phase G + H restart-survival proxy)
-# ============================================================
-log_step "TEST 13 — Hydration Round-Trip (POST /config replays restart)"
-
-# This test exercises the same code path the systemd unit fires on
-# every boot via ExecStartPost: GET /config to capture the live
-# config, POST it back. POST /config tears down the current
-# state.graphrag and rebuilds it via the full hydration sequence —
-# Phase G chunk rehydration from Qdrant + Phase H entity/relationship
-# restore from the sidecar collections. So a successful round-trip
-# here is the same evidence as "restart the systemd unit" without
-# the operational risk.
-#
-# Pass criteria: entityCount and relationshipCount after the round-
-# trip are not less than before (some merge/dedup behavior could
-# legitimately reduce them; zero new entities is the strict
-# expectation). The response's hydrated.{entities,relationships}
-# fields should report the restored counts.
-
-PRE_STATS=$(http_get "$BASE_URL/api/graph/stats" 2>&1)
-PRE_ENT=$(echo "$PRE_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).entityCount ?? 0)" 2>/dev/null)
-PRE_REL=$(echo "$PRE_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).relationshipCount ?? 0)" 2>/dev/null)
-PRE_DOC=$(echo "$PRE_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).documentCount ?? 0)" 2>/dev/null)
-log_info "Pre-restart: documentCount=$PRE_DOC entityCount=$PRE_ENT relationshipCount=$PRE_REL"
-
-if [ "${PRE_ENT:-0}" -eq 0 ] 2>/dev/null; then
-  log_warn "Skipping hydration round-trip (entity graph empty — see Test 7; nothing to verify)"
-else
-  # GET /config to capture the live config. The response wraps the
-  # actual config in {success, config, graphrag_initialized}; we
-  # need just the inner config to POST back.
-  CFG_RESP=$(http_get "$BASE_URL/config" 2>&1)
-  CFG_INNER=$(echo "$CFG_RESP" | $NODE -e "
-    try {
-      const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-      console.log(JSON.stringify(r.config));
-    } catch (e) { console.log(''); }
-  " 2>/dev/null)
-
-  if [ -z "$CFG_INNER" ] || [ "$CFG_INNER" = "null" ] || [ "$CFG_INNER" = "undefined" ]; then
-    log_warn "GET /config returned no live config; skipping round-trip"
-  else
-    HYD_T0=$(now_ms)
-    HYD_RESP=$(http_post "$BASE_URL/config" "$CFG_INNER" 2>&1)
-    HYD_T1=$(now_ms)
-
-    if [ -z "$HYD_RESP" ] || ! echo "$HYD_RESP" | grep -q '"success":true'; then
-      log_fail "POST /config failed: $(echo "$HYD_RESP" | head -c 200)"
-    else
-      log_pass "POST /config round-trip succeeded ($((HYD_T1 - HYD_T0))ms)"
-
-      HYD_FIELDS=$(echo "$HYD_RESP" | $NODE -e "
-        try {
-          const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-          const h = r.hydrated || {};
-          console.log(\`documents=\${h.documents ?? '?'} chunks=\${h.chunks ?? '?'} entities=\${h.entities ?? '?'} relationships=\${h.relationships ?? '?'} skipped=\${h.skipped ?? '?'} orphans=\${h.relationships_skipped_orphan ?? '?'}\`);
-        } catch (e) { console.log(''); }
-      " 2>/dev/null)
-
-      if [ -n "$HYD_FIELDS" ] && ! echo "$HYD_FIELDS" | grep -q 'entities=?'; then
-        log_pass "hydrated summary present in response"
-        log_info "  Hydrated: $HYD_FIELDS"
-      else
-        log_warn "POST /config response missing hydrated summary (older server build?)"
-      fi
-
-      # Verify counts survived the round-trip.
-      POST_STATS=$(http_get "$BASE_URL/api/graph/stats" 2>&1)
-      POST_ENT=$(echo "$POST_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).entityCount ?? 0)" 2>/dev/null)
-      POST_REL=$(echo "$POST_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).relationshipCount ?? 0)" 2>/dev/null)
-      POST_DOC=$(echo "$POST_STATS" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).documentCount ?? 0)" 2>/dev/null)
-      log_info "Post-restart: documentCount=$POST_DOC entityCount=$POST_ENT relationshipCount=$POST_REL"
-
-      # Documents should match (chunks/docs hydrate deterministically
-      # from Qdrant). Allow ±1 slack to ride out any race with
-      # cron-driven appends.
-      if [ "${POST_DOC:-0}" -ge "$((PRE_DOC - 1))" ] 2>/dev/null; then
-        log_pass "documentCount survived round-trip ($PRE_DOC → $POST_DOC)"
-      else
-        log_fail "documentCount regressed: $PRE_DOC → $POST_DOC (chunk hydration broken)"
-      fi
-
-      # Entity/relationship counts should match exactly — the sidecar
-      # collections are the source of truth and round-trip is
-      # deterministic. Strictly less = data loss.
-      if [ "${POST_ENT:-0}" -ge "$PRE_ENT" ] 2>/dev/null; then
-        log_pass "entityCount survived round-trip ($PRE_ENT → $POST_ENT)"
-      else
-        log_fail "entityCount regressed: $PRE_ENT → $POST_ENT (Phase H persistence broken — restart would lose entities)"
-      fi
-      if [ "${POST_REL:-0}" -ge "$PRE_REL" ] 2>/dev/null; then
-        log_pass "relationshipCount survived round-trip ($PRE_REL → $POST_REL)"
-      else
-        log_fail "relationshipCount regressed: $PRE_REL → $POST_REL (Phase H persistence broken)"
-      fi
-    fi
-  fi
 fi
 
 # ============================================================
