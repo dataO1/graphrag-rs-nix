@@ -444,8 +444,10 @@ else
     '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_documents","arguments":{}}}' \
     "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"add_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\",\"title\":\"MCP Test Doc\",\"content\":\"Diffusion models like DDPM and DDIM denoise latent images iteratively. Stable Diffusion uses a U-Net backbone.\"}}}" \
     '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"query","arguments":{"question":"diffusion model","max_results":3}}}' \
+    '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"query_ask","arguments":{"question":"What is a diffusion model?","max_results":3}}}' \
+    '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"query_explain","arguments":{"question":"What is a Transformer?","max_results":3}}}' \
     "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\"}}}" \
-    | GRAPHRAG_BASE_URL="$BASE_URL" timeout 60 "$MCP_BIN" 2>/dev/null)
+    | GRAPHRAG_BASE_URL="$BASE_URL" timeout 180 "$MCP_BIN" 2>/dev/null)
 
   if [ -z "$MCP_OUT" ]; then
     log_fail "graphrag-mcp produced no output"
@@ -491,11 +493,11 @@ else
     R2=$(mcp_resp 2)
     TOOL_COUNT=$(mcp_tools_count "$R2")
     TOOL_NAMES=$(mcp_tools_names "$R2")
-    if [ "${TOOL_COUNT:-0}" -ge 7 ] 2>/dev/null; then
+    if [ "${TOOL_COUNT:-0}" -ge 10 ] 2>/dev/null; then
       log_pass "tools/list advertises $TOOL_COUNT tools"
       log_info "  Tools: $TOOL_NAMES"
     else
-      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥7 — query, graph_stats, list_documents, add_document, delete_document, append_graph, build_graph)"
+      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥10 — query, query_ask, query_explain, query_reason, graph_stats, list_documents, add_document, delete_document, append_graph, build_graph)"
     fi
 
     # 3 — tools/call graph_stats
@@ -559,6 +561,49 @@ else
       log_warn "tools/call delete_document failed (isError=$(mcp_is_error "$R7"))"
     fi
 
+    # 8 — tools/call query_ask (graph-aware mode; LLM round-trip).
+    # Skipped-as-warn rather than failed if entity graph is empty — the
+    # tool itself still works, just returns a degenerate answer.
+    R8=$(mcp_resp 8)
+    if [ "$(mcp_is_error "$R8")" = "false" ]; then
+      ASK_ANSWER=$(echo "$R8" | $NODE -e "
+        const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        const txt = r.result?.content?.[0]?.text ?? '';
+        try {
+          const p = JSON.parse(txt);
+          const a = p.answer || '';
+          console.log(a.length > 0 ? a.slice(0, 80).replace(/\n/g, ' ') : 'EMPTY');
+        } catch (e) { console.log('PARSE-FAIL'); }
+      " 2>/dev/null)
+      if [ "$ASK_ANSWER" = "EMPTY" ] || [ "$ASK_ANSWER" = "PARSE-FAIL" ]; then
+        log_warn "tools/call query_ask returned no answer (entity graph likely empty)"
+      else
+        log_pass "tools/call query_ask — answer: $ASK_ANSWER..."
+      fi
+    else
+      log_fail "tools/call query_ask failed (isError=$(mcp_is_error "$R8"))"
+    fi
+
+    # 9 — tools/call query_explain (graph-aware + attribution).
+    R9=$(mcp_resp 9)
+    if [ "$(mcp_is_error "$R9")" = "false" ]; then
+      EXPLAIN_FIELDS=$(echo "$R9" | $NODE -e "
+        const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        const txt = r.result?.content?.[0]?.text ?? '';
+        try {
+          const p = JSON.parse(txt);
+          const conf = (p.confidence ?? 'null');
+          const ke = (p.keyEntities || p.key_entities || []).length;
+          const rs = (p.reasoningSteps || p.reasoning_steps || []).length;
+          const sr = (p.sources || []).length;
+          console.log(\`confidence=\${conf} keyEntities=\${ke} reasoningSteps=\${rs} sources=\${sr}\`);
+        } catch (e) { console.log('PARSE-FAIL'); }
+      " 2>/dev/null)
+      log_pass "tools/call query_explain — $EXPLAIN_FIELDS"
+    else
+      log_fail "tools/call query_explain failed (isError=$(mcp_is_error "$R9"))"
+    fi
+
     # build_graph deliberately not invoked here — it's a 15-60s LLM
     # round-trip per ingested doc and Test 7 already covered it via the
     # REST path. Rebuilding the graph just to re-prove MCP wiring would
@@ -604,6 +649,114 @@ if [ -n "$LAST_BUILT" ]; then
   log_pass "graph_stats.lastBuiltAt = $LAST_BUILT"
 else
   log_warn "graph_stats.lastBuiltAt missing (older server build?)"
+fi
+
+# ============================================================
+# TEST 11: Query Modes — graph-aware /api/query (mode=ask|explain|reason)
+# ============================================================
+log_step "TEST 11 — Query Modes (mode=ask|explain|reason)"
+
+# These modes call into graphrag-core's ask()/ask_explained()/
+# ask_with_reasoning(). They require a configured chat backend AND a
+# non-empty entity graph; if Test 7 yielded zero entities (e.g. LLM
+# extraction broken) the modes still work but answer quality is low.
+ENT_NOW=$(echo "$STATS_AFTER" | $NODE -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).entityCount ?? 0)" 2>/dev/null)
+
+if [ "${ENT_NOW:-0}" -eq 0 ] 2>/dev/null; then
+  log_warn "Skipping mode=ask/explain (entity graph is empty — see Test 7)"
+else
+  # mode=ask
+  ASK_T0=$(now_ms)
+  ASK_RESP=$(http_post "$BASE_URL/api/query" '{"query":"What is the Transformer architecture?","top_k":5,"mode":"ask"}' 2>&1)
+  ASK_T1=$(now_ms)
+  ASK_ANSWER=$(echo "$ASK_RESP" | $NODE -e "
+    try { console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).answer ?? ''); } catch (e) { console.log(''); }
+  " 2>/dev/null)
+  ASK_BACKEND=$(echo "$ASK_RESP" | $NODE -e "
+    try { console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).backend ?? ''); } catch (e) { console.log(''); }
+  " 2>/dev/null)
+  if [ -n "$ASK_ANSWER" ] && [ "$ASK_BACKEND" = "graphrag" ]; then
+    log_pass "mode=ask returned answer (backend=$ASK_BACKEND, $((ASK_T1 - ASK_T0))ms)"
+    log_info "  Answer head: $(echo "$ASK_ANSWER" | head -c 100 | tr '\n' ' ')..."
+  else
+    log_fail "mode=ask: empty answer or wrong backend ($ASK_BACKEND); raw: $(echo "$ASK_RESP" | head -c 200)"
+  fi
+
+  # mode=explain
+  EXP_T0=$(now_ms)
+  EXP_RESP=$(http_post "$BASE_URL/api/query" '{"query":"What is the Transformer architecture?","top_k":5,"mode":"explain"}' 2>&1)
+  EXP_T1=$(now_ms)
+  EXP_FIELDS=$(echo "$EXP_RESP" | $NODE -e "
+    try {
+      const p = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+      const conf = p.confidence ?? 'null';
+      const ke = (p.keyEntities || []).length;
+      const rs = (p.reasoningSteps || []).length;
+      const sr = (p.sources || []).length;
+      const ans = (p.answer || '').length;
+      console.log(\`answer=\${ans}b confidence=\${conf} keyEntities=\${ke} reasoningSteps=\${rs} sources=\${sr}\`);
+    } catch (e) { console.log(''); }
+  " 2>/dev/null)
+  if [ -n "$EXP_FIELDS" ]; then
+    log_pass "mode=explain returned attribution ($((EXP_T1 - EXP_T0))ms)"
+    log_info "  Fields: $EXP_FIELDS"
+  else
+    log_fail "mode=explain failed; raw: $(echo "$EXP_RESP" | head -c 200)"
+  fi
+fi
+
+# mode=search must still work (back-compat) — ensure the existing
+# semantic-search path didn't regress.
+SEARCH_RESP=$(http_post "$BASE_URL/api/query" '{"query":"GraphRAG","top_k":3,"mode":"search"}' 2>&1)
+SEARCH_BACKEND=$(echo "$SEARCH_RESP" | $NODE -e "
+  try { console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).backend ?? ''); } catch (e) { console.log(''); }
+" 2>/dev/null)
+if [ "$SEARCH_BACKEND" = "qdrant" ] || [ "$SEARCH_BACKEND" = "memory" ]; then
+  log_pass "mode=search back-compat (backend=$SEARCH_BACKEND)"
+else
+  log_fail "mode=search broke: backend=$SEARCH_BACKEND"
+fi
+
+# ============================================================
+# TEST 12: Persistence sidecar collections (graphrag-entities / -relationships)
+# ============================================================
+log_step "TEST 12 — Graph Persistence (Qdrant sidecar collections)"
+
+# After Test 7 (build_graph) the server should have written to two
+# new Qdrant collections: <coll>-entities and <coll>-relationships.
+# Verify they exist and have ≥1 point each (assuming Test 7 produced
+# entities; otherwise warn).
+QDRANT_COLLS=$($CURL -sf "$QDRANT_URL/collections" 2>/dev/null | $NODE -e "
+  try {
+    const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+    console.log((r.result?.collections || []).map(c => c.name).join(' '));
+  } catch (e) { console.log(''); }
+" 2>/dev/null)
+
+if echo "$QDRANT_COLLS" | grep -q "graphrag-entities"; then
+  log_pass "graphrag-entities collection exists"
+  E_COUNT=$($CURL -sf "$QDRANT_URL/collections/graphrag-entities" 2>/dev/null | $NODE -e "
+    try { console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.points_count ?? 0); } catch (e) { console.log(0); }
+  " 2>/dev/null)
+  if [ "${E_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+    log_pass "graphrag-entities holds $E_COUNT entities (entity graph survives restart)"
+  else
+    log_warn "graphrag-entities exists but is empty (Test 7 produced no entities?)"
+  fi
+else
+  if [ "${ENT_NOW:-0}" -gt 0 ]; then
+    log_fail "graphrag-entities collection missing despite entityCount=$ENT_NOW (persistence not wired?)"
+  else
+    log_info "graphrag-entities collection not yet created (no build with entities has run)"
+  fi
+fi
+
+if echo "$QDRANT_COLLS" | grep -q "graphrag-relationships"; then
+  log_pass "graphrag-relationships collection exists"
+  R_COUNT=$($CURL -sf "$QDRANT_URL/collections/graphrag-relationships" 2>/dev/null | $NODE -e "
+    try { console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).result?.points_count ?? 0); } catch (e) { console.log(0); }
+  " 2>/dev/null)
+  log_info "graphrag-relationships holds $R_COUNT relationships"
 fi
 
 # ============================================================
