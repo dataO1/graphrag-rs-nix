@@ -81,12 +81,48 @@ fn tool_definitions() -> Value {
         "tools": [
             {
                 "name": "query",
-                "description": "Search the knowledge graph for relevant content. PRIMARY tool for any question about the user's notes / documents. Returns ranked excerpts with similarity scores. Fast (~350ms). Vector + graph traversal — handles both lexical and conceptual matches. Always try this first; only ingest/index if results are empty AND you have new content to add.",
+                "description": "Vector similarity search over the user's notes. Returns ranked excerpts (no LLM-composed answer). Fast (~350ms). PRIMARY tool for 'do I have notes on X?' or 'show me passages about Y' style questions where you want raw source material. Pick this over `query_ask`/`query_explain` when you only need excerpts to read or quote, not a synthesized answer. Always try this first before deciding to ingest new content.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "question": { "type": "string", "description": "Natural-language question. The user's own phrasing usually retrieves better than aggressive paraphrase." },
                         "max_results": { "type": "integer", "default": 8, "description": "Top-K results to return. 5-10 is typical; raise for breadth, lower for focus." }
+                    },
+                    "required": ["question"]
+                }
+            },
+            {
+                "name": "query_ask",
+                "description": "Graph-aware retrieval + LLM-composed answer. Use when the user asks a question they want ANSWERED, not just sources. Walks the entity graph, ranks chunks/entities/relationships, then has the configured chat backend synthesize an answer. Slower than `query` (LLM round-trip; ~1-10s on local hardware). Pick this over plain `query` when the user wants a direct answer in natural language. Pick `query_explain` instead if the user asks 'why' or 'how do you know' — that returns confidence + sources too. Pick `query_reason` if the question has multiple sub-parts that need decomposition.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "Natural-language question to answer." },
+                        "max_results": { "type": "integer", "default": 8, "description": "Top-K source chunks the engine considers. Higher = more context for the LLM, slower call." }
+                    },
+                    "required": ["question"]
+                }
+            },
+            {
+                "name": "query_explain",
+                "description": "Graph-aware answer WITH attribution: confidence score (0-1), reasoning steps, key entities the answer relied on, and a typed source list (text-chunk / entity / relationship). Use when (a) the user asks 'why', 'how do you know', 'what are your sources', or (b) you want to audit whether an answer is well-grounded before relaying it, or (c) downstream code needs to display citations. More expensive than `query_ask` (extra retrieval + reasoning trace). The returned `confidence` is a useful signal: <0.3 means the engine is guessing — surface that to the user.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "Natural-language question to answer with attribution." },
+                        "max_results": { "type": "integer", "default": 8, "description": "Top-K source chunks the engine considers." }
+                    },
+                    "required": ["question"]
+                }
+            },
+            {
+                "name": "query_reason",
+                "description": "Multi-hop / compound questions. Decomposes the question into sub-queries, answers each, and composes a final answer. Use when the question combines multiple facts that aren't co-located in the corpus — e.g. 'What did I write about X, and how does it relate to Y?', 'Compare A and B from my notes', 'What's the timeline of events involving Z?'. Slowest mode — multiple LLM round-trips. Don't pick this for simple single-fact questions; `query_ask` is faster and just as good there.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "Natural-language compound or multi-hop question." },
+                        "max_results": { "type": "integer", "default": 8, "description": "Top-K source chunks the engine considers per sub-query." }
                     },
                     "required": ["question"]
                 }
@@ -148,6 +184,34 @@ async fn call_tool(client: &Client, cfg: &Config, name: &str, args: &Value) -> R
             let body = json!({
                 "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
                 "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
+                "mode": "search",
+            });
+            let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
+            r.error_for_status()?.json::<Value>().await?
+        }
+        "query_ask" => {
+            let body = json!({
+                "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
+                "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
+                "mode": "ask",
+            });
+            let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
+            r.error_for_status()?.json::<Value>().await?
+        }
+        "query_explain" => {
+            let body = json!({
+                "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
+                "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
+                "mode": "explain",
+            });
+            let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
+            r.error_for_status()?.json::<Value>().await?
+        }
+        "query_reason" => {
+            let body = json!({
+                "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
+                "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
+                "mode": "reason",
             });
             let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
             r.error_for_status()?.json::<Value>().await?
