@@ -36,11 +36,11 @@
     "graphrag-rs-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1777537442,
-        "narHash": "sha256-Zks1k+yYs+fApZhyIlywPOvQ+yT2DVTBD0LmxWBctGs=",
+        "lastModified": 1777540570,
+        "narHash": "sha256-HbIHMgpA2Bs7wh8nNRlIJ8ASelvbw0lar11c72DpVmk=",
         "owner": "dataO1",
         "repo": "graphrag-rs",
-        "rev": "d20372b2116fbdc474340ac1c5acd5a3c5f1db24",
+        "rev": "a38cf8f5d186523c107ba0cb85a09c741b07d57e",
         "type": "github"
       },
       "original": {
