@@ -104,8 +104,20 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "query_local",
+                "description": "Microsoft GraphRAG-style local_search. Embeds the user question, vector-searches the entity graph for top-K semantically-similar seed entities, expands those to their 1-hop neighbors via the relationship graph, and feeds an ENTITIES / RELATIONSHIPS / SOURCE TEXT context block to the chat backend. The most graph-aware mode — explicitly uses the entity vector index, not just chunk vectors. Pick this when the question is conceptually about specific named things in the user's notes (people, projects, products, ideas) and you want the answer grounded in entity-centric retrieval rather than chunk-centric. Returns the same attribution bundle as query_explain (confidence, key entities, reasoning steps, sources). Slower than `query` (~3-10s LLM round-trip) but the answer quality on entity-centric questions is typically higher than `query_explain`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "Natural-language question, ideally about specific entities (people, projects, ideas) in the user's notes." },
+                        "max_results": { "type": "integer", "default": 8, "description": "Top-K seed entities pulled from the entity vector index. Each seed expands to up to 5 neighbors and their mentioning chunks." }
+                    },
+                    "required": ["question"]
+                }
+            },
+            {
                 "name": "query_reason",
-                "description": "Multi-hop / compound questions. Decomposes the question into sub-queries, answers each, and composes a final answer. Use when the question combines multiple facts that aren't co-located in the corpus — e.g. 'What did I write about X, and how does it relate to Y?', 'Compare A and B from my notes', 'What's the timeline of events involving Z?'. Slowest mode — multiple LLM round-trips. Don't pick this for simple single-fact questions; `query_ask` is faster and just as good there.",
+                "description": "Multi-hop / compound questions. Decomposes the question into sub-queries, answers each, and composes a final answer. Use when the question combines multiple facts that aren't co-located in the corpus — e.g. 'What did I write about X, and how does it relate to Y?', 'Compare A and B from my notes', 'What's the timeline of events involving Z?'. Slowest mode — multiple LLM round-trips. Don't pick this for simple single-fact questions; `query_explain` or `query_local` is faster and just as good there.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -199,6 +211,15 @@ async fn call_tool(client: &Client, cfg: &Config, name: &str, args: &Value) -> R
                 "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
                 "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
                 "mode": "reason",
+            });
+            let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
+            r.error_for_status()?.json::<Value>().await?
+        }
+        "query_local" => {
+            let body = json!({
+                "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
+                "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
+                "mode": "local",
             });
             let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
             r.error_for_status()?.json::<Value>().await?

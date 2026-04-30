@@ -597,6 +597,7 @@ else
     "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"add_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\",\"title\":\"MCP Test Doc\",\"content\":\"Diffusion models like DDPM and DDIM denoise latent images iteratively. Stable Diffusion uses a U-Net backbone.\"}}}" \
     '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"query","arguments":{"question":"diffusion model","max_results":3}}}' \
     '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"query_explain","arguments":{"question":"What is a Transformer?","max_results":3}}}' \
+    '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"query_local","arguments":{"question":"What is a Transformer?","max_results":5}}}' \
     '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"query_reason","arguments":{"question":"How do Transformers and diffusion models differ in their use of attention?","max_results":3}}}' \
     "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\"}}}" \
     | GRAPHRAG_BASE_URL="$BASE_URL" timeout 180 "$MCP_BIN" 2>/dev/null)
@@ -645,11 +646,11 @@ else
     R2=$(mcp_resp 2)
     TOOL_COUNT=$(mcp_tools_count "$R2")
     TOOL_NAMES=$(mcp_tools_names "$R2")
-    if [ "${TOOL_COUNT:-0}" -ge 9 ] 2>/dev/null; then
+    if [ "${TOOL_COUNT:-0}" -ge 10 ] 2>/dev/null; then
       log_pass "tools/list advertises $TOOL_COUNT tools"
       log_info "  Tools: $TOOL_NAMES"
     else
-      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥9 — query, query_explain, query_reason, graph_stats, list_documents, add_document, delete_document, append_graph, build_graph)"
+      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥10 — query, query_explain, query_local, query_reason, graph_stats, list_documents, add_document, delete_document, append_graph, build_graph)"
     fi
 
     # 3 — tools/call graph_stats
@@ -736,6 +737,32 @@ else
       log_pass "tools/call query_explain — $ASK_FIELDS"
     else
       log_fail "tools/call query_explain failed (isError=$(mcp_is_error "$R8"))"
+    fi
+
+    # 11 — tools/call query_local (MS GraphRAG-style local_search;
+    #      entity-vector-seeded retrieval). This is the mode that
+    #      reads from the graphrag-entities sidecar. Skip-as-warn on
+    #      empty answer because a cold-start entity collection
+    #      legitimately gives no seeds.
+    R11=$(mcp_resp 11)
+    if [ "$(mcp_is_error "$R11")" = "false" ]; then
+      LOCAL_FIELDS=$(echo "$R11" | $NODE -e "
+        const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+        const txt = r.result?.content?.[0]?.text ?? '';
+        try {
+          const p = JSON.parse(txt);
+          const conf = (p.confidence ?? 'null');
+          const ke = (p.keyEntities || p.key_entities || []).length;
+          const rs = (p.reasoningSteps || p.reasoning_steps || []).length;
+          const sr = (p.sources || []).length;
+          const ans = (p.answer || '').slice(0, 80).replace(/\n/g, ' ');
+          const backend = p.backend || '?';
+          console.log(\`backend=\${backend} confidence=\${conf} keyEntities=\${ke} reasoningSteps=\${rs} sources=\${sr} | answer: \${ans}\`);
+        } catch (e) { console.log('PARSE-FAIL'); }
+      " 2>/dev/null)
+      log_pass "tools/call query_local — $LOCAL_FIELDS"
+    else
+      log_fail "tools/call query_local failed (isError=$(mcp_is_error "$R11"))"
     fi
 
     # 10 — tools/call query_reason (multi-hop decomposition; slowest).
@@ -886,6 +913,42 @@ else
     [ -n "$REASON_HEAD" ] && log_info "  Answer head: $REASON_HEAD..."
   else
     log_warn "mode=reason returned no answer (timed out or LLM busy?); raw head: $(echo "$REASON_RESP" | head -c 200)"
+  fi
+
+  # mode=local — MS GraphRAG-style entity-vector-seeded retrieval.
+  # This is the mode that finally reads from the graphrag-entities
+  # sidecar collection: embed query → vector-search seeds → expand
+  # neighbors → LLM answer. backend should be "graphrag-local-search".
+  LOCAL_T0=$(now_ms)
+  LOCAL_RESP=$(http_post "$BASE_URL/api/query" '{"query":"What is the Transformer architecture?","top_k":5,"mode":"local"}' 2>&1)
+  LOCAL_T1=$(now_ms)
+  LOCAL_BACKEND=$(echo "$LOCAL_RESP" | $NODE -e "
+    try { console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).backend ?? ''); } catch (e) { console.log(''); }
+  " 2>/dev/null)
+  LOCAL_FIELDS=$(echo "$LOCAL_RESP" | $NODE -e "
+    try {
+      const p = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+      const conf = p.confidence ?? 'null';
+      const ke = (p.keyEntities || []).length;
+      const rs = (p.reasoningSteps || []).length;
+      const sr = (p.sources || []).length;
+      const ans = (p.answer || '').length;
+      console.log(\`answer=\${ans}b confidence=\${conf} keyEntities=\${ke} reasoningSteps=\${rs} sources=\${sr}\`);
+    } catch (e) { console.log(''); }
+  " 2>/dev/null)
+  LOCAL_HEAD=$(echo "$LOCAL_RESP" | $NODE -e "
+    try { console.log((JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).answer || '').slice(0, 120).replace(/\n/g, ' ')); } catch (e) { console.log(''); }
+  " 2>/dev/null)
+  if [ "$LOCAL_BACKEND" = "graphrag-local-search" ]; then
+    log_pass "mode=local returned answer (backend=$LOCAL_BACKEND, $((LOCAL_T1 - LOCAL_T0))ms)"
+    [ -n "$LOCAL_FIELDS" ] && log_info "  Fields: $LOCAL_FIELDS"
+    [ -n "$LOCAL_HEAD" ] && log_info "  Answer head: $LOCAL_HEAD..."
+    LOCAL_FIRST_REASON=$(echo "$LOCAL_RESP" | $NODE -e "
+      try { console.log(((JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).reasoningSteps || [])[0]?.description || '').slice(0, 100).replace(/\n/g, ' ')); } catch (e) { console.log(''); }
+    " 2>/dev/null)
+    [ -n "$LOCAL_FIRST_REASON" ] && log_info "  Reasoning step 1: $LOCAL_FIRST_REASON"
+  else
+    log_fail "mode=local: wrong backend ($LOCAL_BACKEND); raw head: $(echo "$LOCAL_RESP" | head -c 200)"
   fi
 fi
 
