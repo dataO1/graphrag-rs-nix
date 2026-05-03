@@ -617,7 +617,14 @@ else
   # Post the live backend's correct config but lie about the dimension.
   # Refactored server should probe-embed and reject with 4xx; pre-refactor
   # accepts it silently and corrupts subsequent inserts.
-  WRONG_DIM=$((ORIG_DIM == 1024 ? 768 : 1024))
+  # Use a value no real embedder ever returns. Earlier this was
+  # `(ORIG_DIM == 1024 ? 768 : 1024)`, which silently broke whenever
+  # /config had drifted away from the live runtime dim — the "wrong"
+  # value would coincidentally be the actual correct dim, the POST
+  # would (rightly) succeed, and the test would mis-report a refactor
+  # regression. Hardcoding 42 makes the test orthogonal to /config
+  # state and isolates the assertion to "server probe-validates dim".
+  WRONG_DIM=42
   log_info "Posting backend=$ORIG_BACKEND with deliberately wrong dim=$WRONG_DIM"
   BAD_BODY="{\"embeddings\":{\"backend\":\"$ORIG_BACKEND\",\"dimension\":$WRONG_DIM,\"model\":\"$ORIG_MODEL\",\"api_endpoint\":\"$ORIG_ENDPOINT\",\"fallback_to_hash\":false}}"
   BAD_RESP=$($CURL -s -o /tmp/bad-dim.json -w '%{http_code}' \
