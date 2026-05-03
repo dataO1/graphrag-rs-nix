@@ -85,10 +85,15 @@ fmt_call_perf() {
     fi
   fi
 }
-# Best-effort: hit /api/embeddings/stats. If the endpoint isn't there
-# yet (older server build), return empty so callers can degrade.
+# Best-effort: hit the embeddings/stats endpoint. The single-source-of-
+# truth refactor moved it from /api/embeddings/stats to /embeddings/stats
+# (escaping the apistos /api scope-shadow bug). Try the new path first,
+# fall back to the old, return empty if neither answers.
 embed_source() {
-  $CURL -sf --max-time 2 "$BASE_URL/api/embeddings/stats" 2>/dev/null || echo ""
+  local body
+  body=$($CURL -sf --max-time 2 "$BASE_URL/embeddings/stats" 2>/dev/null) && [ -n "$body" ] && { echo "$body"; return; }
+  body=$($CURL -sf --max-time 2 "$BASE_URL/api/embeddings/stats" 2>/dev/null) && [ -n "$body" ] && { echo "$body"; return; }
+  echo ""
 }
 
 # --- Parse args ---
@@ -156,31 +161,67 @@ else
   fi
 fi
 
-# Check embedding config
-EMB_BACKEND=$(jq_field "$CONFIG" "config.embeddings.backend")
-EMB_DIM=$(jq_field "$CONFIG" "config.embeddings.dimension")
-log_info "Embeddings (graphrag-core internal config): backend=$EMB_BACKEND dim=$EMB_DIM"
-# The /config struct is graphrag-core's *internal* embedding config —
-# NOT the runtime path graphrag-server actually uses for /api/documents
-# and /api/query (which goes through EmbeddingService). The new
-# /api/embeddings/stats endpoint reports the latter. Older server builds
-# without the endpoint return empty here.
+# Embedding config: single source of truth. Post-refactor, /config,
+# /embeddings/stats, and /health.embeddings all read the same struct
+# (graphrag-core's Config.embeddings, which the server rebuilds the
+# active EmbeddingService from on every POST). Pre-refactor, /config's
+# `embeddings` block was graphrag-core's hash-only dummy, distinct from
+# the env-var-driven runtime EmbeddingService — they drifted silently.
+# This test asserts they agree; if they don't, the refactor either
+# isn't deployed or has regressed.
+EMB_CFG_BACKEND=$(jq_field "$CONFIG" "config.embeddings.backend")
+EMB_CFG_DIM=$(jq_field "$CONFIG" "config.embeddings.dimension")
+log_info "/config           embeddings: backend=$EMB_CFG_BACKEND dim=$EMB_CFG_DIM"
+
 EMB_STATS_INIT=$(embed_source)
 if [ -n "$EMB_STATS_INIT" ]; then
   EMB_RUNTIME_BACKEND=$(jq_field "$EMB_STATS_INIT" "backend")
   EMB_RUNTIME_DIM=$(jq_field "$EMB_STATS_INIT" "dimension")
+  EMB_RUNTIME_MODEL=$(jq_field "$EMB_STATS_INIT" "model")
+  EMB_RUNTIME_ENDPOINT=$(jq_field "$EMB_STATS_INIT" "endpoint")
   EMB_REQS_BEFORE=$(jq_field "$EMB_STATS_INIT" "stats.total_requests")
-  log_info "Embeddings (runtime EmbeddingService): backend=$EMB_RUNTIME_BACKEND dim=$EMB_RUNTIME_DIM total_requests=$EMB_REQS_BEFORE"
-  case "$EMB_RUNTIME_BACKEND" in
-    openai)         log_pass "Runtime embedding backend = openai (OVMS / NPU expected)" ;;
-    ollama)         log_pass "Runtime embedding backend = ollama" ;;
-    hash-fallback)  log_warn "Runtime embedding backend = hash-fallback (OVMS unreachable at startup?)" ;;
-    *)              log_warn "Runtime embedding backend = '$EMB_RUNTIME_BACKEND' (unknown)" ;;
-  esac
+  log_info "/embeddings/stats:           backend=$EMB_RUNTIME_BACKEND dim=$EMB_RUNTIME_DIM model=$EMB_RUNTIME_MODEL endpoint=$EMB_RUNTIME_ENDPOINT total_requests=$EMB_REQS_BEFORE"
 else
   EMB_REQS_BEFORE=""
-  log_info "Embeddings: /api/embeddings/stats not exposed (older server build)"
+  EMB_RUNTIME_BACKEND=""
+  EMB_RUNTIME_DIM=""
+  log_warn "/embeddings/stats not exposed — single-source-of-truth refactor not deployed?"
 fi
+
+# /health should also carry the same embedding info post-refactor.
+HEALTH=$(http_get "$BASE_URL/health")
+EMB_HEALTH_BACKEND=$(jq_field "$HEALTH" "embeddings.backend")
+EMB_HEALTH_DIM=$(jq_field "$HEALTH" "embeddings.dimension")
+if [ -n "$EMB_HEALTH_BACKEND" ] && [ "$EMB_HEALTH_BACKEND" != "undefined" ]; then
+  log_info "/health           embeddings: backend=$EMB_HEALTH_BACKEND dim=$EMB_HEALTH_DIM"
+else
+  EMB_HEALTH_BACKEND=""
+  log_warn "/health does not include embeddings block — refactor not deployed?"
+fi
+
+# Invariant: all three reads agree.
+if [ -n "$EMB_RUNTIME_BACKEND" ]; then
+  if [ "$EMB_CFG_BACKEND" = "$EMB_RUNTIME_BACKEND" ] && [ "$EMB_CFG_DIM" = "$EMB_RUNTIME_DIM" ]; then
+    log_pass "Single source of truth: /config and /embeddings/stats agree (backend=$EMB_CFG_BACKEND dim=$EMB_CFG_DIM)"
+  else
+    log_fail "Drift detected: /config says (backend=$EMB_CFG_BACKEND dim=$EMB_CFG_DIM) but /embeddings/stats says (backend=$EMB_RUNTIME_BACKEND dim=$EMB_RUNTIME_DIM)"
+  fi
+fi
+if [ -n "$EMB_HEALTH_BACKEND" ] && [ -n "$EMB_RUNTIME_BACKEND" ]; then
+  if [ "$EMB_HEALTH_BACKEND" = "$EMB_RUNTIME_BACKEND" ]; then
+    log_pass "Single source of truth: /health agrees with /embeddings/stats"
+  else
+    log_fail "Drift detected: /health backend=$EMB_HEALTH_BACKEND vs /embeddings/stats backend=$EMB_RUNTIME_BACKEND"
+  fi
+fi
+
+case "$EMB_RUNTIME_BACKEND" in
+  openai)        log_pass "Active embedding backend = openai (OVMS / NPU expected)" ;;
+  ollama)        log_pass "Active embedding backend = ollama" ;;
+  hash|hash-fallback) log_warn "Active embedding backend = $EMB_RUNTIME_BACKEND (intended only for tests / no-network ingest)" ;;
+  "")            : ;;
+  *)             log_warn "Active embedding backend = '$EMB_RUNTIME_BACKEND' (unknown)" ;;
+esac
 
 # ============================================================
 # TEST 3: NPU Embedding Service (OVMS)
@@ -500,6 +541,110 @@ REL_COUNT="${POST_REL:-$PRE_REL}"
 # round-trip in Test 7 already restored a populated graph, this is a
 # no-op — saves the 30-60s LLM extraction loop on every e2e run.
 # Override with FORCE_BUILD=1 if you specifically want to re-extract.
+# ============================================================
+# TEST 7.5: Embedding backend switching (single source of truth)
+# ============================================================
+# Verifies the post-refactor invariants:
+#   1. POST /config flipping `embeddings.backend` rebuilds the active
+#      EmbeddingService and updates /config + /embeddings/stats + /health
+#      atomically — no path is left pointing at the old backend.
+#   2. POST /config with `dimension` mismatched against the live backend's
+#      actual output is rejected (HTTP 4xx) instead of silently corrupting
+#      the Qdrant collection.
+# Skipped gracefully if the refactor isn't deployed (no /embeddings/stats
+# or no /health.embeddings → nothing to verify).
+log_step "TEST 7.5 — Embedding Backend Switching (Single Source of Truth)"
+
+if [ -z "$EMB_RUNTIME_BACKEND" ] || [ -z "$EMB_HEALTH_BACKEND" ]; then
+  log_warn "Skipping — refactor endpoints (/embeddings/stats and /health.embeddings) not present"
+else
+  # Snapshot current config so we can restore it.
+  ORIG_CFG_JSON=$(http_get "$BASE_URL/config")
+  ORIG_BACKEND="$EMB_CFG_BACKEND"
+  ORIG_DIM="$EMB_CFG_DIM"
+  ORIG_MODEL=$(jq_field "$ORIG_CFG_JSON" "config.embeddings.model")
+  ORIG_ENDPOINT=$(jq_field "$ORIG_CFG_JSON" "config.embeddings.api_endpoint")
+
+  log_info "Original: backend=$ORIG_BACKEND dim=$ORIG_DIM model=$ORIG_MODEL endpoint=$ORIG_ENDPOINT"
+
+  # ---- 1a) Flip to hash and verify all three reads switch together ----
+  HASH_DIM="$ORIG_DIM"  # hash backend respects whatever dim you ask for
+  log_info "Flipping backend → hash (dim=$HASH_DIM)"
+  FLIP_RESP=$($CURL -s -o /tmp/flip-hash.json -w '%{http_code}' \
+    -X POST "$BASE_URL/config" -H 'Content-Type: application/json' \
+    -d "{\"embeddings\":{\"backend\":\"hash\",\"dimension\":$HASH_DIM,\"fallback_to_hash\":false}}")
+
+  if [ "$FLIP_RESP" != "200" ]; then
+    log_fail "POST /config (→ hash) returned HTTP $FLIP_RESP, expected 200"
+    if [ "$VERBOSE" = true ]; then cat /tmp/flip-hash.json; echo; fi
+  else
+    sleep 0.3
+    A_CFG=$(jq_field "$(http_get $BASE_URL/config)" "config.embeddings.backend")
+    A_RUN=$(jq_field "$(embed_source)" "backend")
+    A_HEA=$(jq_field "$(http_get $BASE_URL/health)" "embeddings.backend")
+    if [ "$A_CFG" = "hash" ] && [ "$A_RUN" = "hash" ] && [ "$A_HEA" = "hash" ]; then
+      log_pass "All three reads flipped to hash atomically (config=$A_CFG runtime=$A_RUN health=$A_HEA)"
+    else
+      log_fail "Backend flip not atomic: config=$A_CFG runtime=$A_RUN health=$A_HEA (expected all 'hash')"
+    fi
+  fi
+
+  # ---- 1b) Flip back to the original backend ----
+  if [ "$ORIG_BACKEND" = "openai" ] && [ -n "$ORIG_ENDPOINT" ] && [ "$ORIG_ENDPOINT" != "undefined" ]; then
+    log_info "Restoring backend → $ORIG_BACKEND (model=$ORIG_MODEL endpoint=$ORIG_ENDPOINT dim=$ORIG_DIM)"
+    RESTORE_BODY="{\"embeddings\":{\"backend\":\"$ORIG_BACKEND\",\"dimension\":$ORIG_DIM,\"model\":\"$ORIG_MODEL\",\"api_endpoint\":\"$ORIG_ENDPOINT\",\"fallback_to_hash\":false}}"
+    RESTORE_RESP=$($CURL -s -o /tmp/restore.json -w '%{http_code}' \
+      -X POST "$BASE_URL/config" -H 'Content-Type: application/json' -d "$RESTORE_BODY")
+    if [ "$RESTORE_RESP" != "200" ]; then
+      log_fail "POST /config (restore → $ORIG_BACKEND) returned HTTP $RESTORE_RESP"
+      if [ "$VERBOSE" = true ]; then cat /tmp/restore.json; echo; fi
+    else
+      sleep 0.3
+      B_CFG=$(jq_field "$(http_get $BASE_URL/config)" "config.embeddings.backend")
+      B_RUN=$(jq_field "$(embed_source)" "backend")
+      B_HEA=$(jq_field "$(http_get $BASE_URL/health)" "embeddings.backend")
+      if [ "$B_CFG" = "$ORIG_BACKEND" ] && [ "$B_RUN" = "$ORIG_BACKEND" ] && [ "$B_HEA" = "$ORIG_BACKEND" ]; then
+        log_pass "Restored to $ORIG_BACKEND atomically (config=$B_CFG runtime=$B_RUN health=$B_HEA)"
+      else
+        log_fail "Restore not atomic: config=$B_CFG runtime=$B_RUN health=$B_HEA (expected all '$ORIG_BACKEND')"
+      fi
+    fi
+  else
+    log_info "Original backend was not openai-with-endpoint; skipping restore step"
+  fi
+
+  # ---- 2) Dim-mismatch rejection ----
+  # Post the live backend's correct config but lie about the dimension.
+  # Refactored server should probe-embed and reject with 4xx; pre-refactor
+  # accepts it silently and corrupts subsequent inserts.
+  WRONG_DIM=$((ORIG_DIM == 1024 ? 768 : 1024))
+  log_info "Posting backend=$ORIG_BACKEND with deliberately wrong dim=$WRONG_DIM"
+  BAD_BODY="{\"embeddings\":{\"backend\":\"$ORIG_BACKEND\",\"dimension\":$WRONG_DIM,\"model\":\"$ORIG_MODEL\",\"api_endpoint\":\"$ORIG_ENDPOINT\",\"fallback_to_hash\":false}}"
+  BAD_RESP=$($CURL -s -o /tmp/bad-dim.json -w '%{http_code}' \
+    -X POST "$BASE_URL/config" -H 'Content-Type: application/json' -d "$BAD_BODY")
+  case "$BAD_RESP" in
+    4??)
+      log_pass "Dim-mismatch POST rejected with HTTP $BAD_RESP (expected 4xx — protects Qdrant from silent corruption)"
+      ;;
+    200)
+      log_fail "Dim-mismatch POST accepted (HTTP 200) — server should probe-embed and reject before mutating state"
+      ;;
+    *)
+      log_warn "Dim-mismatch POST returned unexpected HTTP $BAD_RESP"
+      ;;
+  esac
+  if [ "$VERBOSE" = true ] && [ -s /tmp/bad-dim.json ]; then cat /tmp/bad-dim.json; echo; fi
+
+  # Confirm the bad POST didn't mutate the live state.
+  POST_BAD_RUN=$(jq_field "$(embed_source)" "backend")
+  POST_BAD_DIM=$(jq_field "$(embed_source)" "dimension")
+  if [ "$POST_BAD_RUN" = "$ORIG_BACKEND" ] && [ "$POST_BAD_DIM" = "$ORIG_DIM" ]; then
+    log_pass "Live runtime unchanged after rejected POST (still backend=$POST_BAD_RUN dim=$POST_BAD_DIM)"
+  else
+    log_fail "Live runtime mutated by rejected POST: now backend=$POST_BAD_RUN dim=$POST_BAD_DIM (expected $ORIG_BACKEND/$ORIG_DIM)"
+  fi
+fi
+
 log_step "TEST 8 — Graph Build (conditional — LLM Entity Extraction)"
 
 if [ "${FORCE_BUILD:-0}" != "1" ] && [ "${ENTITY_COUNT:-0}" -gt 0 ] 2>/dev/null; then

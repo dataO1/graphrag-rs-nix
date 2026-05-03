@@ -42,15 +42,43 @@ let
       };
     });
 
-  effectivePipelineConfig =
-    if cfg.pipelineConfig != null then
-      lib.recursiveUpdate chatPipelineConfig cfg.pipelineConfig
-    else if chatPipelineConfig != { } then chatPipelineConfig
-    else null;
+  # Synthesizes the `embeddings` block of the posted pipeline JSON from
+  # the same `embedding.*` options that drive the env vars. Mirrors what
+  # chatPipelineConfig does for chat. The shape matches graphrag-core's
+  # `Config.embeddings` (dimension/backend/model/api_endpoint/api_key/...);
+  # POST /config will rebuild the active EmbeddingService from this block,
+  # so this is the single source of truth post-refactor. Env vars remain
+  # as bootstrap defaults until the POST lands a few hundred ms later.
+  embeddingsPipelineConfig = {
+    embeddings = {
+      backend = cfg.embedding.backend;
+      dimension = cfg.embedding.dimension;
+      fallback_to_hash = false;
+    } // lib.optionalAttrs (cfg.embedding.backend == "openai") {
+      api_endpoint = cfg.embedding.openai.url;
+      model = cfg.embedding.openai.model;
+    } // lib.optionalAttrs (cfg.embedding.backend == "openai" && cfg.embedding.openai.apiKey != "") {
+      api_key = cfg.embedding.openai.apiKey;
+    } // lib.optionalAttrs (cfg.embedding.backend == "ollama") {
+      # Ollama host:port encoded into api_endpoint; the server splits it.
+      api_endpoint = "${cfg.embedding.ollama.url}:${toString cfg.embedding.ollama.port}";
+      model = cfg.embedding.ollama.model;
+    };
+  };
 
-  pipelineConfigFile =
-    if effectivePipelineConfig == null then null
-    else (pkgs.formats.json { }).generate "graphrag-rs-pipeline.json" effectivePipelineConfig;
+  effectivePipelineConfig =
+    let
+      base = lib.recursiveUpdate embeddingsPipelineConfig chatPipelineConfig;
+    in
+    if cfg.pipelineConfig != null then
+      lib.recursiveUpdate base cfg.pipelineConfig
+    else base;
+
+  # Always non-null now: even with chat disabled and no user-supplied
+  # pipelineConfig, embeddingsPipelineConfig is the floor. POSTing this
+  # on every boot is what keeps `Config.embeddings` (the single source of
+  # truth post-refactor) in sync with the user's nix-declared backend.
+  pipelineConfigFile = (pkgs.formats.json { }).generate "graphrag-rs-pipeline.json" effectivePipelineConfig;
 
   envVars = {
     EMBEDDING_BACKEND = cfg.embedding.backend;
@@ -190,6 +218,34 @@ in
               - http://127.0.0.1:9000/v3     OpenVINO Model Server (services.graphrag-rs-npu)
               - http://127.0.0.1:17171/v1    llama-server with --embedding
               - https://api.openai.com/v1    real OpenAI
+          '';
+        };
+        waitForReady = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = ''
+            ExecStartPre polls `<url>/models` until it returns 200 before
+            launching graphrag-server. Fixes the startup race where the
+            embedding probe (graphrag-server/src/embeddings.rs:194) fires
+            before the backend (e.g. OVMS container) has bound its port —
+            on a probe failure graphrag-server silently falls back to hash
+            embeddings and ingests garbage vectors for the rest of the
+            session.
+
+            Only applies when `embedding.backend = "openai"`. Set false if
+            you point at a remote service that's always up (e.g. real
+            OpenAI) or want graphrag-server to start regardless.
+          '';
+        };
+        waitTimeoutSeconds = lib.mkOption {
+          type = lib.types.int;
+          default = 120;
+          description = ''
+            Max seconds to wait for the OpenAI-compat endpoint before
+            giving up and starting anyway (graphrag-server will then fall
+            back to hash embeddings as if waitForReady were false). Cold
+            OVMS NPU model loads typically finish in 15–30s; bump if your
+            backend is slower.
           '';
         };
         model = lib.mkOption {
@@ -356,9 +412,18 @@ in
 
     applyPipelineConfig = lib.mkOption {
       type = lib.types.bool;
-      default = cfg.pipelineConfig != null || cfg.chat.enable;
-      defaultText = "auto: true if pipelineConfig or chat.enable is set";
-      description = "ExecStartPost POSTs the pipeline config to /config once /health is up.";
+      default = true;
+      description = ''
+        ExecStartPost POSTs the pipeline config to /config once /health
+        is up. Defaults to true because the synthesized embeddings block
+        is the single source of truth for the active embedding backend
+        post-refactor — without this POST the server runs with whatever
+        Config defaults the binary ships (currently hash/384), regardless
+        of `embedding.*` settings here.
+
+        Set false only if you intend to drive /config externally (e.g.
+        for testing or a custom pipeline JSON via `pipelineConfig`).
+      '';
     };
 
     environment = lib.mkOption {
@@ -418,6 +483,32 @@ in
           RestartSec = "5s";
           Environment = lib.mapAttrsToList (k: v: "${k}=${v}") envVars;
         }
+        (lib.mkIf (cfg.embedding.backend == "openai" && cfg.embedding.openai.waitForReady) {
+          # Block startup until the OpenAI-compat /models endpoint
+          # answers. graphrag-server's embedding probe is one-shot at
+          # init (embeddings.rs:194) — if it fires before OVMS/vLLM has
+          # bound its port, it silently degrades to hash embeddings for
+          # the rest of the process lifetime. Cross-scope ordering on
+          # the system-level OVMS unit isn't expressible from a user
+          # unit, so we poll instead. Exit 0 on timeout so graphrag-server
+          # still starts (matches the explicit-fallback contract).
+          ExecStartPre = pkgs.writeShellScript "graphrag-rs-wait-embeddings" ''
+            set -u
+            export PATH=${lib.makeBinPath [ pkgs.coreutils ]}
+            url="${cfg.embedding.openai.url}/models"
+            deadline=$(( $(date +%s) + ${toString cfg.embedding.openai.waitTimeoutSeconds} ))
+            echo "graphrag-rs: waiting for embedding endpoint $url"
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              if ${pkgs.curl}/bin/curl -fs -o /dev/null --max-time 3 "$url"; then
+                echo "graphrag-rs: embedding endpoint ready"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "graphrag-rs: embedding endpoint did not respond within ${toString cfg.embedding.openai.waitTimeoutSeconds}s; starting anyway (will fall back to hash)"
+            exit 0
+          '';
+        })
         (lib.mkIf cfg.applyPipelineConfig {
           ExecStartPost = pkgs.writeShellScript "graphrag-rs-apply-config" ''
             set -eu
