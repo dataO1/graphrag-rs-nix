@@ -110,6 +110,8 @@ let
     COLLECTION_NAME = cfg.qdrant.collection;
     APPEND_DEBOUNCE_SECS = toString cfg.autoAppendDebounceSecs;
     EXTRACTION_CONCURRENCY = toString cfg.extractionConcurrency;
+    GRAPHRAG_HOST = cfg.host;
+    GRAPHRAG_PORT = toString cfg.port;
     RUST_LOG = cfg.logLevel;
   } // ingestEnvVars // cfg.environment;
 
@@ -152,16 +154,25 @@ in
       type = lib.types.str;
       default = "127.0.0.1";
       description = ''
-        Address used by the MCP wrapper and `mcp.json` to reach the REST server.
-        NOTE: Upstream graphrag-server hardcodes its bind to "0.0.0.0:8080" —
-        this option only controls how clients address it.
+        Address graphrag-server binds to (env var `GRAPHRAG_HOST`),
+        and the address the MCP wrapper / `mcp.json` use to reach it.
+        Default `127.0.0.1` keeps the API loopback-only; set to
+        `0.0.0.0` to expose on all interfaces (firewall externally
+        on multi-user hosts).
       '';
     };
 
     port = lib.mkOption {
       type = lib.types.port;
-      default = 8080;
-      description = "Port the MCP wrapper / mcp.json target. Hardcoded upstream: 8080.";
+      default = 17180;
+      description = ''
+        Port graphrag-server listens on (env var `GRAPHRAG_PORT`),
+        and the port the MCP wrapper / `mcp.json` target. Default
+        `17180` lives in the project's LLM-tooling port range
+        (llama-server family at 17171/17173/17178; voice-mcp at
+        17179). The historical default was 8080 — collides too
+        easily with web-dev servers; switched to 17180 in v0.2.
+      '';
     };
 
     # ---------- Startup embedding backend (env-var driven) ----------
