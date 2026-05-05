@@ -109,6 +109,7 @@ let
     QDRANT_URL = cfg.qdrant.url;
     COLLECTION_NAME = cfg.qdrant.collection;
     APPEND_DEBOUNCE_SECS = toString cfg.autoAppendDebounceSecs;
+    EXTRACTION_CONCURRENCY = toString cfg.extractionConcurrency;
     RUST_LOG = cfg.logLevel;
   } // ingestEnvVars // cfg.environment;
 
@@ -649,6 +650,34 @@ in
           configured (TODO).
         '';
       };
+    };
+
+    extractionConcurrency = lib.mkOption {
+      type = lib.types.int;
+      default = 4;
+      example = 8;
+      description = ''
+        Cap on concurrent in-flight LLM entity-extraction calls
+        (env var `EXTRACTION_CONCURRENCY`). graphrag-core's
+        per-chunk extraction runs through `buffer_unordered`; this
+        knob bounds how many chunks can be hitting the chat backend
+        at the same time.
+
+        **Match this to the chat backend's parallel-slot count.** For
+        llama-server: `services.llama-servers.<name>.parallel`. For
+        vLLM: `--max-num-seqs`. Going higher than the backend's slot
+        count just queues requests and adds latency; lower wastes
+        GPU throughput.
+
+        Per-call ctx requirement is ~4K tokens (chunk 512 + prompt
+        ~350 + output cap 1.5K + 20% margin, clamped to floor 4096).
+        Per-slot ctx on llama-server = `--ctx-size / --parallel`;
+        ensure that's ≥ 4K (and ideally ≥ 8K for healthy headroom on
+        recall calls that share the same backend).
+
+        On a 90K/parallel=4 layout each slot gets 22.5K — comfortable
+        for both extraction and graph-aware recall.
+      '';
     };
 
     autoAppendDebounceSecs = lib.mkOption {
