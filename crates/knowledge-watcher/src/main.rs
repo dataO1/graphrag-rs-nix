@@ -143,17 +143,29 @@ fn is_eligible(path: &Path, allowed_extensions: &HashSet<String>) -> bool {
     if !path.is_file() {
         return false;
     }
+    // Reject paths where ANY component is a hidden dir (.git/,
+    // .obsidian/, .venv/, .cache/, .direnv/, ...). The initial
+    // `WalkBuilder::standard_filters` skips these naturally; the live
+    // inotify path doesn't, so we re-implement that filter here.
+    // Allows leading "/" and "." / ".." which are root markers.
+    if path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .any(|s| s.starts_with('.') && s != "." && s != "..")
+    {
+        return false;
+    }
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
     // Editor backups + common noise even gitignore won't catch.
-    if name.starts_with('.') || name.ends_with('~') {
+    if name.ends_with('~') {
         return false;
     }
     if name == "4913" /* vim probe */ || name.ends_with(".swp") || name.ends_with(".swo") {
         return false;
     }
-    if (name.starts_with('#') && name.ends_with('#')) || name.starts_with(".#") {
+    if name.starts_with('#') && name.ends_with('#') {
         return false;
     }
     let ext = path
@@ -162,6 +174,16 @@ fn is_eligible(path: &Path, allowed_extensions: &HashSet<String>) -> bool {
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
     allowed_extensions.contains(&ext)
+}
+
+/// Same hidden-component check, exposed for the DELETE path where
+/// `is_eligible` can't be used (the file is gone, so `is_file()` is
+/// false). Both `is_eligible` and live DELETE need to skip
+/// .obsidian/.git/etc.
+fn path_has_hidden_component(path: &Path) -> bool {
+    path.components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .any(|s| s.starts_with('.') && s != "." && s != "..")
 }
 
 /// Build a unified gitignore matcher across all watched roots so live
@@ -388,13 +410,29 @@ async fn main() -> Result<()> {
                 let Some(action) = action else { continue };
 
                 // Path-eligibility check applies to both Upsert and
-                // Delete (so a deleted .swp file doesn't trigger a
-                // bogus DELETE call).
-                let is_dir_or_missing = match &action {
-                    IngestAction::Delete(_) => false, // file may be gone; can't stat
+                // Delete (so a deleted .swp / .git/index doesn't
+                // trigger a bogus DELETE call).
+                let skip = match &action {
+                    IngestAction::Delete(p) => {
+                        // File is gone; can't stat or check extension
+                        // robustly. Reject anything under a hidden
+                        // dir (.git/, .obsidian/, ...) and anything
+                        // matching the editor-backup name patterns.
+                        if path_has_hidden_component(p) {
+                            true
+                        } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                            name.ends_with('~')
+                                || name.ends_with(".swp")
+                                || name.ends_with(".swo")
+                                || name == "4913"
+                                || (name.starts_with('#') && name.ends_with('#'))
+                        } else {
+                            true
+                        }
+                    },
                     IngestAction::Upsert(p) => !is_eligible(p, &cfg.allowed_extensions),
                 };
-                if is_dir_or_missing {
+                if skip {
                     continue;
                 }
 
