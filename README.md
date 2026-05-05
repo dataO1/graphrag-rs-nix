@@ -94,6 +94,47 @@ The MCP wrapper is installed on `PATH` and a sample MCP-client config is
 rendered to `$XDG_CONFIG_HOME/graphrag-rs/mcp.json` for symlinking into Claude
 Code / opencode / crush.
 
+## Path-based ingestion
+
+`POST /api/documents` accepts four body shapes; pick whichever the
+agent has cheapest:
+
+| Body | When |
+|---|---|
+| `{ "path": "/abs/file.md" }` | one file already on disk |
+| `{ "paths": ["/a", "/b"] }` | known list of files |
+| `{ "pathsGlob": "**/*.md", "globRoot": "/abs/dir" }` | folder walk |
+| `{ "title": "...", "content": "..." }` | inline / generated text |
+
+Path-form requests save the agent from inlining the file into its
+own context — the server reads off disk, sandboxes, dedups, embeds.
+Multi-path requests come back with a `results` array of per-path
+`{path, status, document_id?, error?}` entries (`status` ∈ `ingested`,
+`duplicate`, `unsupported`, `rejected`, `error`).
+
+Sandbox is **canonicalize + starts_with** against
+`services.graphrag-rs.ingest.allowedRoots`. Empty (the default) keeps
+path-ingest disabled — the server will 403 path-form requests until
+you opt in. Symlinks are rejected by default; size cap is 16 MiB.
+
+Non-text formats (pdf, docx, png, mp3, mp4, …) route through the
+optional preprocessor service — see [TODO.md](./TODO.md) §
+"Multimodal preprocessor (Nemotron-3-Nano-Omni)" for the planned
+implementation. Until that lands, non-text files are reported as
+`unsupported` and skipped.
+
+```nix
+services.graphrag-rs = {
+  ingest = {
+    allowedRoots = [ "/home/data01/notes" "/home/data01/Documents" ];
+    # maxFileBytes = 16 * 1024 * 1024;   # default
+    # allowedExtensions = [ "md" "txt" "rs" /* … */ ];   # rich default
+    # preprocessorUrl = "http://127.0.0.1:9100/preprocess";   # null by default
+    # followSymlinks = false;
+  };
+};
+```
+
 ## Known build limitations
 
 - **No Qdrant** in the current build. `qdrant-client v1.15.0`'s build.rs

@@ -114,15 +114,40 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "add_document",
-                "description": "Ingest one document (title + body) into the vector store. Returns the assigned id. Does NOT extract entities — that happens via `append_graph` (after a batch) or `build_graph` (cold-start). Content-hash dedup is automatic: ingesting the same content twice returns the existing id without duplicating. After a batch of add_document calls, run `append_graph` once — NOT once per document. The optional `id` field lets you supply a stable user-side id (the path you used, a UUID you assigned, etc.) so you can later delete by it.",
+                "description": "Ingest a document into the vector store. Returns the assigned id (or per-path results for batch). Does NOT extract entities — that happens via `append_graph` (after a batch) or `build_graph` (cold-start). Content-hash dedup is automatic: ingesting the same content twice returns the existing id without duplicating. After a batch, run `append_graph` once — NOT once per document.\n\nFour body shapes, exactly one of which must be set:\n  • `path` — absolute filesystem path. **Strongly preferred when the document already exists on disk** — the server reads it directly, saving you from spending tokens loading the file into context just to hand it back. Title defaults to the filename without extension; id defaults to the absolute path.\n  • `paths_glob` — glob pattern (e.g. `**/*.md`). Anchored at `glob_root` if relative, otherwise at the first sandbox root. Server expands and ingests every match in one call. Use for batches.\n  • `paths` — explicit list of absolute paths. Same per-entry rules as `path`.\n  • `content` — inline body (legacy). Use only when the text is generated, not when it's already on disk. Requires `title`.\n\nPath-form requests are sandboxed: only files under the server's `INGEST_ALLOWED_ROOTS` are readable. Non-text files (pdf/docx/png/mp3/...) route through the configured preprocessor when one is wired up; otherwise they're skipped with status `unsupported`. Multi-path responses come back with a `results` array of per-path `{path, status, document_id?, error?}` entries — `status` is one of `ingested`, `duplicate`, `unsupported`, `rejected`, or `error`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "id": { "type": "string", "description": "Optional caller-supplied id. Stored alongside the auto-assigned UUID; either can be passed to delete_document later." },
-                        "title": { "type": "string", "description": "Human-readable title shown in list_documents and query results." },
-                        "content": { "type": "string", "description": "Document body (markdown / plain text). Will be chunked." }
-                    },
-                    "required": ["content"]
+                        "id": {
+                            "type": "string",
+                            "description": "Optional caller-supplied id. Stored alongside the auto-assigned UUID. For path-form requests this defaults to the absolute path so you can later delete by the same path you ingested."
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Optional human-readable title. Required for `content`-form. For path-form, defaults to the file basename without extension."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Inline document body. Mutually exclusive with `path`/`paths`/`paths_glob`. Use only for generated text — NEVER read a file into your context just to pass it here; supply `path` instead."
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path to one file. Server reads it under the sandbox; non-text extensions go through the preprocessor when configured."
+                        },
+                        "paths": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Explicit list of absolute paths. One ingest result per entry; per-entry errors don't fail siblings."
+                        },
+                        "paths_glob": {
+                            "type": "string",
+                            "description": "Glob pattern. Examples: `/home/me/notes/**/*.md`, or `journal/2026/**/*.md` combined with `glob_root`. Expanded server-side."
+                        },
+                        "glob_root": {
+                            "type": "string",
+                            "description": "Anchor for relative `paths_glob`. Must be inside one of the server's allowed roots. When omitted, the first allowed root is used."
+                        }
+                    }
                 }
             },
             {

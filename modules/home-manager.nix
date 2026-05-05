@@ -80,6 +80,23 @@ let
   # truth post-refactor) in sync with the user's nix-declared backend.
   pipelineConfigFile = (pkgs.formats.json { }).generate "graphrag-rs-pipeline.json" effectivePipelineConfig;
 
+  # ---------- Path-based ingestion ----------
+  # POST /api/documents accepts {path}/{paths}/{pathsGlob} when the
+  # server has at least one allowed root. Empty allowedRoots disables
+  # path-ingest entirely (the only ingest form that still works is
+  # the legacy {title, content} body). Sandbox check is canonicalize +
+  # starts_with against this list — symlinks that escape will fail
+  # canonicalize. See graphrag-server/src/ingest_policy.rs.
+  ingestEnvVars = lib.optionalAttrs (cfg.ingest.allowedRoots != [ ]) {
+    INGEST_ALLOWED_ROOTS = lib.concatStringsSep ":" cfg.ingest.allowedRoots;
+  } // {
+    INGEST_MAX_FILE_BYTES = toString cfg.ingest.maxFileBytes;
+    INGEST_ALLOWED_EXTENSIONS = lib.concatStringsSep "," cfg.ingest.allowedExtensions;
+    INGEST_FOLLOW_SYMLINKS = if cfg.ingest.followSymlinks then "1" else "0";
+  } // lib.optionalAttrs (cfg.ingest.preprocessorUrl != null) {
+    INGEST_PREPROCESSOR_URL = cfg.ingest.preprocessorUrl;
+  };
+
   envVars = {
     EMBEDDING_BACKEND = cfg.embedding.backend;
     EMBEDDING_DIM = toString cfg.embedding.dimension;
@@ -92,7 +109,7 @@ let
     QDRANT_URL = cfg.qdrant.url;
     COLLECTION_NAME = cfg.qdrant.collection;
     RUST_LOG = cfg.logLevel;
-  } // cfg.environment;
+  } // ingestEnvVars // cfg.environment;
 
   mcpClientConfig = pkgs.writeText "graphrag-mcp.json" (builtins.toJSON {
     mcpServers.graphrag = {
@@ -279,6 +296,106 @@ in
         type = lib.types.str;
         default = "graphrag";
         description = "Qdrant collection name (env var COLLECTION_NAME).";
+      };
+    };
+
+    # ---------- Path-based ingestion ----------
+    # Allows agents to POST {path}, {paths}, or {pathsGlob} to
+    # /api/documents instead of inlining file contents into their
+    # prompt. The server reads off disk, sandboxes, dedups, and
+    # ingests. Non-text formats (pdf, docx, image, audio, video)
+    # route through the optional preprocessor service when configured
+    # — see graphrag-rs-nix/TODO.md § "Multimodal preprocessor".
+    ingest = {
+      allowedRoots = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "/home/data01/notes" "/home/data01/Documents" ];
+        description = ''
+          Absolute filesystem paths the server is allowed to read for
+          path-based ingestion. Empty (the default) disables
+          path-ingestion entirely — only the legacy `{title, content}`
+          POST shape will work, which keeps the server's read surface
+          at zero until you opt in.
+
+          Each entry is canonicalized at boot; non-existent roots are
+          warned and dropped. A request path is accepted iff its own
+          canonical form starts_with at least one entry; symlinks
+          fail canonicalize unless `followSymlinks` is true.
+
+          (Plumbed as colon-separated env var INGEST_ALLOWED_ROOTS.)
+        '';
+      };
+
+      maxFileBytes = lib.mkOption {
+        type = lib.types.int;
+        default = 16 * 1024 * 1024;
+        description = ''
+          Per-file size cap (env var INGEST_MAX_FILE_BYTES). Larger
+          files land as `rejected` in the response. graphrag chunking
+          + entity extraction over a single multi-hundred-MB blob is
+          almost never the intent — raise explicitly when it is.
+        '';
+      };
+
+      allowedExtensions = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [
+          "md" "markdown" "mdx" "txt" "text" "rst" "org" "adoc" "asciidoc" "tex"
+          "json" "yaml" "yml" "toml" "ini" "csv" "tsv" "log"
+          "rs" "py" "js" "mjs" "cjs" "ts" "tsx" "jsx"
+          "go" "c" "h" "cpp" "cc" "hpp" "hh" "java" "kt" "kts"
+          "rb" "php" "swift" "scala" "clj" "ex" "exs" "erl" "hs"
+          "sql" "sh" "bash" "zsh" "fish" "ps1"
+          "nix" "dhall"
+          "html" "htm" "xml" "svg" "css" "scss" "less"
+          "graphql" "gql" "proto" "thrift"
+        ];
+        description = ''
+          Lower-case extensions (no leading dot) that are read
+          directly as UTF-8 text (env var INGEST_ALLOWED_EXTENSIONS,
+          comma-separated). Anything outside the list either routes
+          through `preprocessorUrl` (when set) or is reported as
+          `unsupported` in the response.
+
+          The default list covers markdown, prose, code, structured
+          data, and shell — the formats graphrag chunks well today.
+          Non-text formats (pdf, docx, png, mp3, mp4, ...) deliberately
+          aren't here so callers don't accidentally embed binary as
+          UTF-8 garbage; route them through the preprocessor instead.
+        '';
+      };
+
+      preprocessorUrl = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "http://127.0.0.1:9100/preprocess";
+        description = ''
+          Optional URL of a preprocessor service that converts non-
+          text files to markdown before ingest (env var
+          INGEST_PREPROCESSOR_URL). When set, files whose extension
+          is NOT in `allowedExtensions` are POSTed as
+          `{ "path": "<absolute>" }`; the response is parsed as
+          `{ "markdown": "...", "title"?: "..." }` and ingested.
+
+          Null (default) means non-text files are reported as
+          `unsupported` and skipped. The planned Nemotron-3-Nano-Omni
+          preprocessor (PDF/DOCX/image/audio/video → markdown) lives
+          here once it ships — see graphrag-rs-nix/TODO.md.
+        '';
+      };
+
+      followSymlinks = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          When false (default), any caller-supplied path that is itself
+          a symlink is rejected as a defense-in-depth measure (env var
+          INGEST_FOLLOW_SYMLINKS=0). Canonicalize already follows
+          symlinks for sandbox enforcement, so a symlink whose target
+          lives inside `allowedRoots` would be readable — this knob
+          is for shops that don't want callers feeding symlinks at all.
+        '';
       };
     };
 

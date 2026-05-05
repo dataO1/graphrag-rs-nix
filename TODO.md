@@ -123,6 +123,112 @@ Tracked work items for `graphrag-rs-nix`. Tick boxes as you go.
       out of scope for this flake. Without it, `EmbeddingConfig.api_endpoint`
       will remain dead code.
 
+## Multimodal preprocessor (Nemotron-3-Nano-Omni)
+
+The MCP `add_document` tool now accepts `path` / `paths` / `pathsGlob`
+so agents can hand the server a filesystem path and skip inlining the
+file into their context. Server-side enforcement is in
+`graphrag-server/src/ingest_policy.rs`. Path-form requests with a
+non-text extension (pdf, docx, png, mp3, mp4, …) hit the optional
+preprocessor service via `INGEST_PREPROCESSOR_URL` — the contract is
+already wired in graphrag-server. **Building the preprocessor itself
+is the open work.**
+
+### Contract (frozen, server expects this)
+
+```
+POST {INGEST_PREPROCESSOR_URL}
+Content-Type: application/json
+{
+  "path": "/abs/path/to/file.pdf"
+}
+
+→ 200 OK
+{
+  "markdown": "# Doc title\n\n…clean markdown…",
+  "title":    "optional human-readable title"      // server falls back
+                                                     // to file basename
+}
+```
+
+Failure modes (any non-2xx, malformed JSON, missing `markdown` field)
+land as per-path `status="error"` in the multi-path response — the
+batch keeps going for sibling paths.
+
+### Recommended implementation
+
+| Format | Tool | Notes |
+|---|---|---|
+| `.pdf` (clean) | `pdftotext` (poppler) | fast deterministic path; use when the PDF has a real text layer |
+| `.pdf` (scanned, image-heavy, charts) | **Nemotron-3-Nano-Omni-NVFP4** | model card MMLongBench-Doc 57.5, OCRBenchV2 65.8 |
+| `.docx` / `.pptx` / `.html` | `pandoc` | deterministic; pandoc → markdown |
+| `.xlsx` / `.csv` | `pandas` / `csv` | per-row markdown table |
+| `.png` / `.jpg` (chart, diagram, screenshot) | Nemotron-Omni | CharXiv-reasoning 63.6 |
+| `.mp3` / `.wav` (audio, voice notes) | Nemotron-Omni ASR | WER 5.95, speaker turns |
+| `.mp4` (video) | Nemotron-Omni (frames + ASR) | Video-MME 72.2 |
+
+Routing logic (~10-line Python):
+
+```python
+ext = Path(path).suffix.lower()
+if ext == ".pdf" and has_text_layer(path):     return pdftotext(path)
+elif ext in {".docx", ".pptx", ".html"}:        return pandoc(path)
+elif ext in {".xlsx", ".csv", ".tsv"}:          return tabular_to_md(path)
+elif ext in {".pdf", ".png", ".jpg", ".jpeg",   # vision-or-mixed
+             ".mp3", ".wav", ".m4a",            # audio
+             ".mp4", ".mov", ".webm"}:          # video
+    return nemotron_omni(path)                  # via llama-server / vLLM
+else:
+    return {"error": f"unsupported extension: {ext}"}, 415
+```
+
+### Model load strategy (24 GB VRAM)
+
+Use **`llama-swap`** in front of two `llama-server` instances:
+
+- `qwen3.6-27b` — `ttl: 0` (always hot, daily driver, ~17.6 GB)
+- `nemotron-omni` — `ttl: 600` (5-minute idle eviction; mmproj
+  wired for vision/video; ~21 GB NVFP4)
+
+Single-GPU contention is the constraint: when the preprocessor needs
+Nemotron-Omni it evicts Qwen3.6-27B; when graphrag-server hits the
+chat backend the preprocessor's idle TTL has expired and Qwen3.6-27B
+comes back. For burst ingest of a folder, batch the preprocessor
+calls so only one swap happens.
+
+NVFP4 vs Q4_K_M: prefer NVFP4 when the vendor publishes one (NVIDIA
+does for Nemotron-Omni — `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4`).
+−0.4 pp accuracy vs BF16, and Blackwell sm_120 has a native tensor-
+core path. See `MODELS.md` for the full quant guidance.
+
+### Plan of work
+
+- [ ] **`crates/graphrag-preproc/`** — small Rust (or Python; Rust is
+      consistent with the rest of the tree) HTTP service. ~150 LoC.
+      Routes by extension as above; deterministic tools live in the
+      service; non-text VLM/ASR calls go to llama-server over OpenAI-
+      compat /v1/chat/completions with image/audio attachments.
+- [ ] **`pkgs/graphrag-preproc.nix`** — crane build wrapper.
+- [ ] **`pkgs/llama-swap.nix`** — package llama-swap (or take from
+      a community flake) so the NixOS module can hand it a config.
+- [ ] **NixOS module addition** — extend `services.graphrag-rs-npu`
+      (or add a sibling `services.graphrag-rs-preproc`) that:
+      - runs llama-swap with the two-model YAML
+      - downloads `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4`
+        and `unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL` into a model cache dir
+      - launches the graphrag-preproc HTTP service on a free port
+      - sets `services.graphrag-rs.ingest.preprocessorUrl` to that port
+- [ ] **Watch-folder mode (optional)** — graphrag-preproc could
+      additionally watch a folder via inotify and POST `/api/documents`
+      itself with `pathsGlob`, so `mv ~/Inbox/foo.pdf ~/Notes/` is enough
+      to ingest. Out of scope for v1; revisit once the on-demand path
+      is stable.
+- [ ] **Integration test** — drop a known PDF, image, and audio file
+      into the watch folder; verify three documents land in Qdrant via
+      `mcp__graphrag__list_documents` with sane titles + non-trivial
+      markdown content; then `mcp__graphrag__query` returns the right
+      one for a content-targeted question.
+
 ## MCP wrapper
 
 - [ ] Real integration test: spawn `graphrag-mcp` from Claude Code's

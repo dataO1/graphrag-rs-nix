@@ -18,7 +18,11 @@
     # /api/documents resource-merge) plus the new OpenAI-compatible embedding
     # backend. Bump to local path during iteration.
     graphrag-rs-src = {
-      url = "github:dataO1/graphrag-rs/openai-compat";
+      # Local path during iteration on the path-ingest patch (commit
+      # cb1c928 on openai-compat). Once pushed to dataO1/graphrag-rs
+      # and verified, flip back to:
+      #   url = "github:dataO1/graphrag-rs/openai-compat";
+      url = "path:/home/data01/Projects/graphrag-rs";
       flake = false;
     };
   };
