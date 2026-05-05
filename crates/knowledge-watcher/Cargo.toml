@@ -1,0 +1,29 @@
+[package]
+name = "knowledge-watcher"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Filesystem watcher that keeps a graphrag-rs knowledge graph in sync — initial walk + live inotify, gitignore-aware, text-only"
+
+[[bin]]
+name = "knowledge-watcher"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Filesystem watch + gitignore-aware walker
+notify = "8"
+notify-debouncer-full = "0.6"
+ignore = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

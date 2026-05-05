@@ -61,17 +61,21 @@
         knowledge-mcp = pkgs.callPackage ./pkgs/knowledge-mcp.nix {
           inherit craneLib;
         };
+
+        knowledge-watcher = pkgs.callPackage ./pkgs/knowledge-watcher.nix {
+          inherit craneLib;
+        };
       in
       {
         packages = {
-          inherit graphrag-rs knowledge-mcp;
+          inherit graphrag-rs knowledge-mcp knowledge-watcher;
           graphrag-server = graphrag-rs.server;
           graphrag-cli = graphrag-rs.cli;
           default = graphrag-rs.server;
         };
 
         devShells.default = pkgs.mkShell {
-          inputsFrom = [ graphrag-rs.server knowledge-mcp ];
+          inputsFrom = [ graphrag-rs.server knowledge-mcp knowledge-watcher ];
           packages = with pkgs; [ nixpkgs-fmt nil rust-analyzer ];
         };
 

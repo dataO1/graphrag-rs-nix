@@ -99,7 +99,7 @@ fn tool_definitions() -> Value {
         "tools": [
             {
                 "name": "recall",
-                "description": "Ask the local knowledge graph a question. Returns an LLM-composed answer plus confidence, key entities, and sources.\n\nMode picks retrieval strategy:\n  • `default` — graph-aware hybrid (entity + relationship). Start here.\n  • `thorough` — `default` + raw chunk-vector recall. Use when `default` came back low-confidence and you suspect the answer is in the corpus.\n  • `local` — entity-centric (skips keyword extraction). Use when the question is about a specific named entity already in the graph.\n  • `simple` — vector excerpts, no LLM (~350ms). Use to cheaply check whether the corpus has anything on a topic.\n\nSet `reason: true` for compound multi-hop questions (\"compare A and B\", \"timeline of X\"). Slowest path; overrides `mode`.",
+                "description": "Ask the local knowledge graph a question. Returns an LLM-composed answer plus confidence, key entities, and sources.\n\nMode picks retrieval strategy:\n  • `default` — graph-aware hybrid (entity + relationship). Start here.\n  • `thorough` — `default` + raw chunk-vector recall. Use when `default` came back low-confidence and you suspect the answer is in the corpus.\n  • `local` — entity-centric (skips keyword extraction). Use when the question is about a specific named entity already in the graph.\n  • `simple` — vector excerpts, no LLM (~350ms). Use to cheaply check whether the corpus has anything on a topic.\n\nSet `reason: true` for compound multi-hop questions (\"compare A and B\", \"timeline of X\"). Slowest path; overrides `mode`.\n\nHistory: by default returns the *current* version of each doc only. For \"what changed since X\" set `as_of` (RFC 3339); to compare versions of the same doc set `max_versions_per_doc > 1`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -110,14 +110,16 @@ fn tool_definitions() -> Value {
                             "default": "default"
                         },
                         "reason": { "type": "boolean", "default": false, "description": "Decompose into sub-queries; slowest." },
-                        "max_results": { "type": "integer", "default": 8, "description": "Top-K seeds. 5-10 typical." }
+                        "max_results": { "type": "integer", "default": 8, "description": "Top-K seeds. 5-10 typical." },
+                        "as_of": { "type": "string", "format": "date-time", "description": "RFC 3339; only consider chunks updated at or after this time. Use for 'what changed since X'." },
+                        "max_versions_per_doc": { "type": "integer", "default": 1, "description": "Per source doc, how many recent versions to consider. 1 = current only (default)." }
                     },
                     "required": ["question"]
                 }
             },
             {
                 "name": "remember",
-                "description": "Save doc(s) to the local knowledge graph. Vector recall (`mode=simple`) sees them immediately; graph-aware modes (`default`/`local`/`reason`) need the server-side auto-append to fire — typically ~1 min after the last ingest in a burst.\n\nPick one body shape:\n  ✅ `path` — file on disk\n  ✅ `paths_glob` — glob like `/abs/dir/**/*.md`\n  ✅ `paths` — explicit list of files\n  ✅ `content` + `title` — generated/pasted text\n  ❌ Read+forward via `content` — use `path` instead.\n\nBatch response: `results[]`, per-entry `status` ∈ {ingested, duplicate, unsupported, rejected, error}.",
+                "description": "Save doc(s) to the local knowledge graph. Recallable shortly after — no follow-up call needed.\n\nPick one body shape:\n  ✅ `path` — file on disk\n  ✅ `paths_glob` — glob like `/abs/dir/**/*.md`\n  ✅ `paths` — explicit list of files\n  ✅ `content` + `title` — generated/pasted text\n  ❌ Read+forward via `content` — use `path` instead.\n\nBatch response: `results[]`, per-entry `status` ∈ {ingested, duplicate, unsupported, rejected, error}.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -188,11 +190,19 @@ async fn call_tool(client: &Client, cfg: &Config, name: &str, args: &Value) -> R
                     ),
                 }
             };
-            let body = json!({
+            // Forward optional history-aware params verbatim. Default
+            // (both unset) preserves the per-doc current-only behavior.
+            let mut body = json!({
                 "query": args.get("question").and_then(|v| v.as_str()).unwrap_or(""),
                 "top_k": args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(8),
                 "mode": server_mode,
             });
+            if let Some(v) = args.get("as_of") {
+                body["asOf"] = v.clone();
+            }
+            if let Some(v) = args.get("max_versions_per_doc") {
+                body["maxVersionsPerDoc"] = v.clone();
+            }
             let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
             r.error_for_status()?.json::<Value>().await?
         }

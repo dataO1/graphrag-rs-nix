@@ -114,6 +114,49 @@ becomes graph-queryable in ~1 min. There's no `append_graph` or
 `build_graph` to call by hand — `remember` something and `recall`
 sees it shortly after.
 
+## History-aware retrieval
+
+Re-ingesting a doc with the same `user_id` (path-form ingest
+defaults `user_id = absolute path`) doesn't delete anything. The
+server marks the prior version's chunks `is_current = false` and
+writes new chunks at `version + 1`. Default `recall` filters to
+`is_current = true` so top-K is never polluted by superseded
+versions; opt in to history with two optional `recall` params:
+
+| param | type | default | semantics |
+|---|---|---|---|
+| `as_of` | RFC 3339 | unset | only consider chunks updated at or after this time |
+| `max_versions_per_doc` | int | `1` | per source doc, how many recent versions to consider |
+
+"What changed in my SEMLA notes since yesterday?" → agent passes
+`as_of: "2026-05-04T00:00:00Z"`. "How did the roadmap evolve?" →
+`max_versions_per_doc: 5`. No new tools.
+
+## Filesystem watcher
+
+Optional sidecar (`services.graphrag-rs.watcher.enable = true`)
+that keeps the local knowledge graph synced with a set of root
+directories — initial walk on startup + live debounced ingest on
+every editor save. Built on `notify-debouncer-full` (handles
+Vim/VSCode/Obsidian atomic-rename correctly) and BurntSushi's
+`ignore` crate (same gitignore engine ripgrep uses; respects
+`.gitignore`/`~/.gitignore_global`/hidden-file rules).
+
+Stable doc id = absolute path → server's upsert-by-user_id flow
+handles edits cleanly. Defaults reuse
+`services.graphrag-rs.ingest.{allowedRoots,allowedExtensions}` so
+the watcher and the path-ingest sandbox always agree about scope.
+
+```nix
+services.graphrag-rs.watcher = {
+  enable = true;
+  # watchPaths = cfg.ingest.allowedRoots;   # default
+  # debounceMs = 300;                        # default
+  # initialIndex = true;                     # default
+  # maxInFlight = 4;                         # default
+};
+```
+
 ## Path-based ingestion
 
 `POST /api/documents` accepts four body shapes; pick whichever the

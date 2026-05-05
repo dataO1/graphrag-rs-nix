@@ -123,6 +123,28 @@ Tracked work items for `graphrag-rs-nix`. Tick boxes as you go.
       out of scope for this flake. Without it, `EmbeddingConfig.api_endpoint`
       will remain dead code.
 
+## History compactor (bound storage growth)
+
+History-aware ingest never deletes superseded chunks (graphrag-rs
+commit 8add578 — `is_current=false` flips, no removal). Storage
+grows linearly with edit frequency. At today's note-taking volumes
+this is fine, but a TODO doc edited 100×/year × 1k chars/edit ≈
+100k chars of historical chunks per doc per year — small per-doc,
+adds up across a corpus.
+
+When/if disk pressure surfaces, ship a compactor:
+
+- `services.graphrag-rs.history.compactKeepN` option (default `0`
+  = ∞, opt-in cap). When > 0, drop chunks where
+  `version < (max_version_per_user_id - keep_n + 1)`.
+- Implementation: nightly user systemd timer firing a
+  `POST /api/history/compact` endpoint. Server walks per-user_id,
+  finds max version, qdrant `delete_points` with payload filter
+  `(user_id, version < threshold)`. Same payload-filter delete
+  pattern `mark_user_id_superseded` already uses.
+- Out-of-scope until disk pressure is real. Track the
+  per-collection point count via `/api/graph/stats` to decide.
+
 ## Multimodal preprocessor (Nemotron-3-Nano-Omni)
 
 The MCP `add_document` tool now accepts `path` / `paths` / `pathsGlob`

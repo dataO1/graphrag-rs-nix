@@ -556,6 +556,101 @@ in
       description = "RUST_LOG value for the server.";
     };
 
+    # ---------- Filesystem watcher (knowledge-watcher) ----------
+    # Optional sidecar that watches a set of root directories with
+    # inotify and keeps the local knowledge graph synced — initial
+    # walk on boot + live debounced upserts on every editor save.
+    # Stable doc id = absolute path so the server's
+    # upsert-by-user_id flow takes care of "I edited my markdown"
+    # correctly (content_hash dedup is automatic; on real changes
+    # the new chunks land at version+1 and the prior version's
+    # chunks get marked superseded).
+    watcher = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Run `knowledge-watcher` as a second user systemd unit
+          alongside `graphrag-rs.service`. Off by default — opt in
+          when you want a folder kept auto-synced.
+        '';
+      };
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = flakePkgs.knowledge-watcher;
+        defaultText = "graphrag-rs flake's knowledge-watcher output";
+        description = "Watcher package to run.";
+      };
+
+      watchPaths = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = cfg.ingest.allowedRoots;
+        defaultText = "services.graphrag-rs.ingest.allowedRoots";
+        description = ''
+          Absolute filesystem paths to watch (env var
+          `WATCHER_ROOTS`, colon-separated). Defaults to the
+          server's `ingest.allowedRoots` so the watcher and the
+          server's path-ingest sandbox always agree about what's
+          eligible. Override only when you want the watcher to see
+          a strict subset.
+        '';
+      };
+
+      debounceMs = lib.mkOption {
+        type = lib.types.int;
+        default = 300;
+        description = ''
+          Inotify debounce window in milliseconds (env var
+          `WATCHER_DEBOUNCE_MS`). One editor save typically fires
+          3-5 events; 300 ms is comfortable for Vim/VSCode/Obsidian
+          atomic-write patterns. Drop to 50-100 ms for very
+          interactive feel; raise on slow filesystems.
+        '';
+      };
+
+      maxInFlight = lib.mkOption {
+        type = lib.types.int;
+        default = 4;
+        description = ''
+          Max concurrent ingest POSTs (env var
+          `WATCHER_MAX_IN_FLIGHT`). The initial walk + bursty live
+          events use a semaphore so we don't open thousands of
+          HTTP connections to the embedding service at once.
+        '';
+      };
+
+      initialIndex = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Run a recursive walk over `watchPaths` at startup,
+          ingesting every eligible file (env var
+          `WATCHER_INITIAL_INDEX=1`). gitignore-aware — uses the
+          same engine ripgrep does (BurntSushi's `ignore` crate).
+          The server's content-hash dedup makes second-runs free.
+
+          Set false to skip the walk and only react to live
+          events.
+        '';
+      };
+
+      allowedExtensions = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = cfg.ingest.allowedExtensions;
+        defaultText = "services.graphrag-rs.ingest.allowedExtensions";
+        description = ''
+          Lower-case extensions (no leading dot) the watcher will
+          ingest (env var `WATCHER_ALLOWED_EXTENSIONS`,
+          comma-separated). Defaults to the server's
+          `ingest.allowedExtensions` so they stay consistent.
+          Non-text formats (pdf, docx, png, …) are deliberately not
+          here; they'll route through the preprocessor when one is
+          configured (TODO).
+        '';
+      };
+    };
+
     autoAppendDebounceSecs = lib.mkOption {
       type = lib.types.int;
       default = 60;
@@ -677,5 +772,38 @@ in
     # in-process — no curl, no oneshot service, no timer. Set
     # `autoAppendDebounceSecs = 0` if you want to drive append
     # entirely externally.
+
+    # Optional filesystem watcher: keeps the local knowledge graph
+    # synced with a set of root directories. Stable doc id =
+    # absolute path → server-side upsert-by-user_id handles edits
+    # cleanly (new chunks at version+1, prior version's chunks
+    # marked superseded; nothing deleted). Off by default.
+    systemd.user.services.knowledge-watcher = lib.mkIf cfg.watcher.enable {
+      Unit = {
+        Description = "knowledge-watcher: keep the local knowledge graph synced with watched folders";
+        # Wait for graphrag-rs.service to be Active so the initial
+        # walk hits a live server. graphrag-rs.service can come up
+        # before this; if knowledge-watcher fails it'll restart.
+        Requires = [ "graphrag-rs.service" ];
+        After = [ "graphrag-rs.service" ];
+      };
+      Service = {
+        ExecStart = "${cfg.watcher.package}/bin/knowledge-watcher";
+        Restart = "on-failure";
+        RestartSec = "5s";
+        Environment = lib.mapAttrsToList (k: v: "${k}=${v}") {
+          WATCHER_BASE_URL = "http://${cfg.host}:${toString cfg.port}";
+          WATCHER_ROOTS = lib.concatStringsSep ":" cfg.watcher.watchPaths;
+          WATCHER_DEBOUNCE_MS = toString cfg.watcher.debounceMs;
+          WATCHER_MAX_IN_FLIGHT = toString cfg.watcher.maxInFlight;
+          WATCHER_INITIAL_INDEX = if cfg.watcher.initialIndex then "1" else "0";
+          WATCHER_ALLOWED_EXTENSIONS = lib.concatStringsSep "," cfg.watcher.allowedExtensions;
+          WATCHER_LOG = cfg.logLevel;
+        };
+      };
+      Install = {
+        WantedBy = [ "default.target" ];
+      };
+    };
   };
 }
