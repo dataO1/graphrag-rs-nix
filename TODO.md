@@ -15,7 +15,7 @@ Tracked work items for `graphrag-rs-nix`. Tick boxes as you go.
       All workspace members inherit this via `{ workspace = true }`,
       so generate-snippets is off everywhere; `download_snapshots`
       (snapshot upload/download) and `serde` (Qdrant type ser/de) stay on.
-- [ ] First successful `nix build .#graphrag-mcp`.
+- [ ] First successful `nix build .#knowledge-mcp`.
 - [ ] Add `nix flake check` (with build) to a CI workflow once builds pass.
 - [ ] Decide whether to expose `graphrag-cli` separately or drop it (it's
       currently built but not wired into the home-manager module).
@@ -33,7 +33,7 @@ Tracked work items for `graphrag-rs-nix`. Tick boxes as you go.
       `/health` is responsive.
 - [ ] Confirm REST endpoints under `/api/*` are still correct after the
       first successful build by hitting them with curl. Spot-check return
-      shapes against what `graphrag-mcp` assumes.
+      shapes against what `knowledge-mcp` assumes.
 
 ## Upstream patches needed
 
@@ -231,8 +231,10 @@ core path. See `MODELS.md` for the full quant guidance.
 
 ## MCP wrapper
 
-- [ ] Real integration test: spawn `graphrag-mcp` from Claude Code's
-      `mcp.json`, verify `tools/list` and a roundtrip `query` succeed.
+- [ ] Real integration test: spawn `knowledge-mcp` from Claude Code's
+      `mcp.json`, verify `tools/list` returns the new five-tool surface
+      (`recall`/`remember`/`forget`/`catalog`/`status`) and a roundtrip
+      `recall` succeeds.
 - [ ] Replace ad-hoc JSON-string content with structured `content[]` arrays
       that match what the upstream REST `/api/query` actually returns.
 - [ ] Add timeout / retry / friendly error messages on connection refused.

@@ -5,11 +5,11 @@
 }:
 
 let
-  src = craneLib.cleanCargoSource ../crates/graphrag-mcp;
+  src = craneLib.cleanCargoSource ../crates/knowledge-mcp;
 
   commonArgs = {
     inherit src;
-    pname = "graphrag-mcp";
+    pname = "knowledge-mcp";
     version = "0.1.0";
     strictDeps = true;
 
@@ -25,9 +25,9 @@ craneLib.buildPackage (commonArgs // {
   inherit cargoArtifacts;
 
   meta = {
-    description = "Stdio MCP server proxying tools to a graphrag-rs REST instance";
+    description = "Stdio MCP server exposing your local knowledge graph (recall/remember/forget) over a graphrag-rs REST backend";
     license = lib.licenses.mit;
     platforms = lib.platforms.linux;
-    mainProgram = "graphrag-mcp";
+    mainProgram = "knowledge-mcp";
   };
 })

@@ -1,12 +1,12 @@
 [package]
-name = "graphrag-mcp"
+name = "knowledge-mcp"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Stdio MCP server proxying tools to a graphrag-rs REST instance"
+description = "Stdio MCP server exposing your local knowledge graph (recall/remember/forget over a graphrag-rs REST backend)"
 
 [[bin]]
-name = "graphrag-mcp"
+name = "knowledge-mcp"
 path = "src/main.rs"
 
 [dependencies]

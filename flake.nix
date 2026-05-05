@@ -1,5 +1,5 @@
 {
-  description = "graphrag-rs packaged for NixOS + home-manager, with a thin stdio-MCP wrapper";
+  description = "graphrag-rs packaged for NixOS + home-manager, plus `knowledge-mcp` — a stdio MCP server exposing your local knowledge graph";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -58,20 +58,20 @@
           src = graphrag-rs-src;
         };
 
-        graphrag-mcp = pkgs.callPackage ./pkgs/graphrag-mcp.nix {
+        knowledge-mcp = pkgs.callPackage ./pkgs/knowledge-mcp.nix {
           inherit craneLib;
         };
       in
       {
         packages = {
-          inherit graphrag-rs graphrag-mcp;
+          inherit graphrag-rs knowledge-mcp;
           graphrag-server = graphrag-rs.server;
           graphrag-cli = graphrag-rs.cli;
           default = graphrag-rs.server;
         };
 
         devShells.default = pkgs.mkShell {
-          inputsFrom = [ graphrag-rs.server graphrag-mcp ];
+          inputsFrom = [ graphrag-rs.server knowledge-mcp ];
           packages = with pkgs; [ nixpkgs-fmt nil rust-analyzer ];
         };
 

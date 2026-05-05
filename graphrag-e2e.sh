@@ -722,15 +722,15 @@ else
 fi
 
 # ============================================================
-# TEST 10: MCP Server (graphrag-mcp stdio bridge)
+# TEST 10: MCP Server (knowledge-mcp stdio bridge)
 # ============================================================
-log_step "TEST 10 — MCP Server (graphrag-mcp)"
+log_step "TEST 10 — MCP Server (knowledge-mcp)"
 
-MCP_BIN=$(command -v graphrag-mcp 2>/dev/null \
-  || ls /etc/profiles/per-user/*/bin/graphrag-mcp 2>/dev/null | head -1)
+MCP_BIN=$(command -v knowledge-mcp 2>/dev/null \
+  || ls /etc/profiles/per-user/*/bin/knowledge-mcp 2>/dev/null | head -1)
 
 if [ -z "$MCP_BIN" ] || [ ! -x "$MCP_BIN" ]; then
-  log_warn "graphrag-mcp binary not found (skip — set installMcp=true on the HM module)"
+  log_warn "knowledge-mcp binary not found (skip — set installMcp=true on the HM module)"
 else
   log_info "Using $MCP_BIN"
   # Drive a full tool tour through one stdio session — the MCP server
@@ -744,20 +744,20 @@ else
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"graphrag-e2e","version":"1.0"}}}' \
     '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
     '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"graph_stats","arguments":{}}}' \
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_documents","arguments":{}}}' \
-    "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"add_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\",\"title\":\"MCP Test Doc\",\"content\":\"Diffusion models like DDPM and DDIM denoise latent images iteratively. Stable Diffusion uses a U-Net backbone.\"}}}" \
-    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"query","arguments":{"question":"diffusion model","mode":"simple","max_results":3}}}' \
-    '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"query","arguments":{"question":"What is a Transformer?","mode":"default","max_results":3}}}' \
-    '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"query","arguments":{"question":"What is a Transformer?","mode":"local","max_results":5}}}' \
-    '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"query","arguments":{"question":"How do Transformers relate to attention mechanisms?","mode":"default","max_results":5}}}' \
-    '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"query","arguments":{"question":"Summarize what I know about deep learning architectures.","mode":"thorough","max_results":5}}}' \
-    '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"query","arguments":{"question":"How do Transformers and diffusion models differ in their use of attention?","reason":true,"max_results":3}}}' \
-    "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"delete_document\",\"arguments\":{\"id\":\"$MCP_DOC_ID\"}}}" \
-    | GRAPHRAG_BASE_URL="$BASE_URL" timeout 180 "$MCP_BIN" 2>/dev/null)
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"status","arguments":{}}}' \
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"catalog","arguments":{}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"remember\",\"arguments\":{\"id\":\"$MCP_DOC_ID\",\"title\":\"MCP Test Doc\",\"content\":\"Diffusion models like DDPM and DDIM denoise latent images iteratively. Stable Diffusion uses a U-Net backbone.\"}}}" \
+    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"recall","arguments":{"question":"diffusion model","mode":"simple","max_results":3}}}' \
+    '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"recall","arguments":{"question":"What is a Transformer?","mode":"default","max_results":3}}}' \
+    '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"recall","arguments":{"question":"What is a Transformer?","mode":"local","max_results":5}}}' \
+    '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"recall","arguments":{"question":"How do Transformers relate to attention mechanisms?","mode":"default","max_results":5}}}' \
+    '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"recall","arguments":{"question":"Summarize what I know about deep learning architectures.","mode":"thorough","max_results":5}}}' \
+    '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"recall","arguments":{"question":"How do Transformers and diffusion models differ in their use of attention?","reason":true,"max_results":3}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"forget\",\"arguments\":{\"id\":\"$MCP_DOC_ID\"}}}" \
+    | KNOWLEDGE_BASE_URL="$BASE_URL" timeout 180 "$MCP_BIN" 2>/dev/null)
 
   if [ -z "$MCP_OUT" ]; then
-    log_fail "graphrag-mcp produced no output"
+    log_fail "knowledge-mcp produced no output"
   else
     # Pluck a response by id — the protocol guarantees id round-trip.
     # Wrapped in an IIFE because top-level `return` is illegal in
@@ -800,47 +800,47 @@ else
     R2=$(mcp_resp 2)
     TOOL_COUNT=$(mcp_tools_count "$R2")
     TOOL_NAMES=$(mcp_tools_names "$R2")
-    if [ "${TOOL_COUNT:-0}" -ge 7 ] 2>/dev/null; then
+    if [ "${TOOL_COUNT:-0}" -ge 5 ] 2>/dev/null; then
       log_pass "tools/list advertises $TOOL_COUNT tools"
       log_info "  Tools: $TOOL_NAMES"
     else
-      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥7 — query, graph_stats, list_documents, add_document, delete_document, append_graph, build_graph)"
+      log_fail "tools/list count too low: $TOOL_COUNT (expected ≥5 — recall, remember, forget, catalog, status)"
     fi
 
-    # 3 — tools/call graph_stats
+    # 3 — tools/call status
     R3=$(mcp_resp 3)
     if [ "$(mcp_is_error "$R3")" = "false" ]; then
       ENT=$(mcp_call_text_field "$R3" "entityCount")
       REL=$(mcp_call_text_field "$R3" "relationshipCount")
-      log_pass "tools/call graph_stats — entities=$ENT relationships=$REL"
+      log_pass "tools/call status — entities=$ENT relationships=$REL"
     else
-      log_fail "tools/call graph_stats failed (isError=$(mcp_is_error "$R3"))"
+      log_fail "tools/call status failed (isError=$(mcp_is_error "$R3"))"
     fi
 
-    # 4 — tools/call list_documents
+    # 4 — tools/call catalog
     R4=$(mcp_resp 4)
     if [ "$(mcp_is_error "$R4")" = "false" ]; then
       TOTAL=$(mcp_call_text_field "$R4" "total")
-      log_pass "tools/call list_documents — total=$TOTAL"
+      log_pass "tools/call catalog — total=$TOTAL"
     else
-      log_fail "tools/call list_documents failed (isError=$(mcp_is_error "$R4"))"
+      log_fail "tools/call catalog failed (isError=$(mcp_is_error "$R4"))"
     fi
 
-    # 5 — tools/call add_document (creates a doc the query test will hit)
+    # 5 — tools/call remember (creates a doc the recall test will hit)
     R5=$(mcp_resp 5)
     if [ "$(mcp_is_error "$R5")" = "false" ]; then
       ADD_OK=$(mcp_call_text_field "$R5" "success")
       ADD_ID=$(mcp_call_text_field "$R5" "documentId")
       if [ "$ADD_OK" = "true" ]; then
-        log_pass "tools/call add_document — id=$ADD_ID"
+        log_pass "tools/call remember — id=$ADD_ID"
       else
-        log_fail "tools/call add_document returned success=false"
+        log_fail "tools/call remember returned success=false"
       fi
     else
-      log_fail "tools/call add_document failed (isError=$(mcp_is_error "$R5"))"
+      log_fail "tools/call remember failed (isError=$(mcp_is_error "$R5"))"
     fi
 
-    # 6 — tools/call query mode=simple (vector excerpts only, no LLM).
+    # 6 — tools/call recall mode=simple (vector excerpts only, no LLM).
     # Validates the field translation (question→query, max_results→top_k)
     # and the agent-mode → server-mode mapping (simple → search).
     R6=$(mcp_resp 6)
@@ -850,21 +850,21 @@ else
         const txt = r.result?.content?.[0]?.text ?? '';
         try { console.log((JSON.parse(txt).results || []).length); } catch (e) { console.log('?'); }
       " 2>/dev/null)
-      log_pass "tools/call query mode=simple — got $Q_RESULTS results"
+      log_pass "tools/call recall mode=simple — got $Q_RESULTS results"
     else
       Q_ERR=$(echo "$R6" | $NODE -e "
         const r = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
         console.log(r.result?.content?.[0]?.text || JSON.stringify(r));
       " 2>/dev/null | head -c 200)
-      log_fail "tools/call query mode=simple failed: $Q_ERR"
+      log_fail "tools/call recall mode=simple failed: $Q_ERR"
     fi
 
-    # 7 — tools/call delete_document (cleans up the doc we added)
+    # 7 — tools/call forget (cleans up the doc we added)
     R7=$(mcp_resp 7)
     if [ "$(mcp_is_error "$R7")" = "false" ]; then
-      log_pass "tools/call delete_document — cleaned up $MCP_DOC_ID"
+      log_pass "tools/call forget — cleaned up $MCP_DOC_ID"
     else
-      log_warn "tools/call delete_document failed (isError=$(mcp_is_error "$R7"))"
+      log_warn "tools/call forget failed (isError=$(mcp_is_error "$R7"))"
     fi
 
     # Helper: parse a graph-aware MCP query response and report fields.

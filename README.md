@@ -1,8 +1,10 @@
 # graphrag-rs-nix
 
 Nix flake packaging [automataIA/graphrag-rs](https://github.com/automataIA/graphrag-rs)
-for NixOS + home-manager, plus a thin stdio-MCP wrapper (`graphrag-mcp`) that
-proxies tool calls to the REST server so any MCP client can drive it.
+for NixOS + home-manager, plus **`knowledge-mcp`** — a stdio MCP server that
+exposes the running graphrag-rs instance as a small set of verb-named tools
+(`recall`, `remember`, `forget`, `catalog`, `status`) so any MCP client can
+drive it as a local knowledge graph.
 
 ## Layout
 
@@ -11,9 +13,9 @@ proxies tool calls to the REST server so any MCP client can drive it.
 ├── flake.nix
 ├── pkgs/
 │   ├── graphrag-rs.nix        crane build of graphrag-server + graphrag-cli
-│   └── graphrag-mcp.nix       crane build of the in-tree MCP wrapper
+│   └── knowledge-mcp.nix      crane build of the in-tree MCP server
 ├── crates/
-│   └── graphrag-mcp/          ~250 LoC stdio JSON-RPC → REST proxy
+│   └── knowledge-mcp/         stdio JSON-RPC → REST proxy
 └── modules/
     ├── home-manager.nix       services.graphrag-rs (user) — graphrag-server
     └── nixos.nix              services.graphrag-rs-npu (system) — OVMS + NPU
@@ -90,9 +92,22 @@ services.graphrag-rs = {
 };
 ```
 
-The MCP wrapper is installed on `PATH` and a sample MCP-client config is
-rendered to `$XDG_CONFIG_HOME/graphrag-rs/mcp.json` for symlinking into Claude
-Code / opencode / crush.
+The MCP server (`knowledge-mcp`) is installed on `PATH` and a sample
+MCP-client config is rendered to `$XDG_CONFIG_HOME/knowledge-mcp/mcp.json`
+for symlinking into Claude Code / opencode / crush. The five tools it
+exposes:
+
+| Tool | What it does |
+|---|---|
+| `recall(question, mode?, reason?)` | ask the graph; modes: `default`, `thorough`, `local`, `simple` |
+| `remember(path \| paths_glob \| paths \| content+title)` | save doc(s); prefer path-forms |
+| `forget(id)` | drop a document |
+| `catalog()` | list ingested docs |
+| `status()` | counts + lastBuiltAt |
+
+Entity extraction runs on a 30-min cron, so there's no `append_graph`
+or `build_graph` to call by hand — `remember` something and it shows
+up in `recall` shortly after.
 
 ## Path-based ingestion
 
