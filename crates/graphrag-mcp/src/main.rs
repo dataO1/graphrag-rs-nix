@@ -114,39 +114,17 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "add_document",
-                "description": "Ingest doc(s) into the vector store. Content-hash dedup is automatic. Run `append_graph` ONCE after a batch (not per doc) to fold chunks into the entity graph.\n\nPick exactly one body shape — cheapest first:\n  ✅ `path` — file is on disk, you don't need its bytes. Server reads directly.\n  ✅ `paths_glob` — ingest a folder, e.g. `\"**/*.md\"` + `glob_root`, or `\"/abs/dir/**/*.md\"`.\n  ✅ `paths` — specific list of files.\n  ✅ `content` (+ `title`) — ONLY for text you generated or the user pasted.\n  ❌ Reading a file with another tool then forwarding via `content` — wrong shape, wasted tokens. Use `path`.\n\nPath-form is sandboxed to `INGEST_ALLOWED_ROOTS`. Non-text files (pdf/docx/png/...) route through the preprocessor when configured, else `unsupported`. Multi-path response: `results[]` with per-entry `status` ∈ {`ingested`, `duplicate`, `unsupported`, `rejected`, `error`}; per-entry errors don't abort siblings.",
+                "description": "Ingest doc(s) into the knowledge graph. Call `append_graph` once after a batch (not per doc).\n\nPick one body shape:\n  ✅ `path` — file on disk\n  ✅ `paths_glob` — glob like `/abs/dir/**/*.md`\n  ✅ `paths` — explicit list of files\n  ✅ `content` + `title` — generated/pasted text\n  ❌ Read+forward via `content` — use `path` instead.\n\nBatch response: `results[]`, per-entry `status` ∈ {ingested, duplicate, unsupported, rejected, error}.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Absolute path to one file. Server reads it under the sandbox."
-                        },
-                        "paths_glob": {
-                            "type": "string",
-                            "description": "Glob, e.g. `/abs/dir/**/*.md` or relative + `glob_root`. Expanded server-side."
-                        },
-                        "glob_root": {
-                            "type": "string",
-                            "description": "Anchor for relative `paths_glob`. Must be inside an allowed root."
-                        },
-                        "paths": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Explicit list of absolute paths."
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Inline body, generated/pasted text only. Don't read a file just to pass it here — use `path`."
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "Required for `content`. Path-form defaults to file basename."
-                        },
-                        "id": {
-                            "type": "string",
-                            "description": "Caller-supplied id for later delete. Path-form defaults to absolute path."
-                        }
+                        "path":       { "type": "string", "description": "Absolute path to one file." },
+                        "paths_glob": { "type": "string", "description": "Glob, e.g. `/abs/dir/**/*.md` or relative + `glob_root`." },
+                        "glob_root":  { "type": "string", "description": "Anchor for relative `paths_glob`." },
+                        "paths":      { "type": "array", "items": { "type": "string" }, "description": "Explicit list of absolute paths." },
+                        "content":    { "type": "string", "description": "Inline body. Use only for generated/pasted text." },
+                        "title":      { "type": "string", "description": "Required for `content`." },
+                        "id":         { "type": "string", "description": "Optional caller-supplied id for later delete." }
                     }
                 }
             },
