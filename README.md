@@ -105,9 +105,14 @@ exposes:
 | `catalog()` | list ingested docs |
 | `status()` | counts + lastBuiltAt |
 
-Entity extraction runs on a 30-min cron, so there's no `append_graph`
-or `build_graph` to call by hand — `remember` something and it shows
-up in `recall` shortly after.
+Entity extraction is auto-coalesced server-side: graphrag-server
+spawns a background tokio task that wakes on every successful
+ingest, debounces `autoAppendDebounceSecs` of silence (default 60),
+and folds the new chunks into the entity graph in-process. A
+folder-ingest of 200 files lands as one append; a single doc
+becomes graph-queryable in ~1 min. There's no `append_graph` or
+`build_graph` to call by hand — `remember` something and `recall`
+sees it shortly after.
 
 ## Path-based ingestion
 

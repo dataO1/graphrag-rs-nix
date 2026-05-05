@@ -8,11 +8,11 @@
 //   catalog   — list ingested documents (GET /api/documents)
 //   status    — graph counts + last-built timestamp (GET /api/graph/stats)
 //
-// `append_graph` and `build_graph` are NOT exposed: a 30-min cron on
-// the server fires `/api/graph/append` automatically and the home-
-// manager module persists the entity graph across restarts. Agents
-// just call `recall` / `remember` / `forget` and the graph stays
-// fresh on its own.
+// `append_graph` and `build_graph` are NOT exposed: graphrag-server
+// runs an in-process debounced coalescer that wakes on every
+// successful ingest and folds new chunks into the entity graph
+// after a brief quiet window. Agents just call `recall` / `remember`
+// / `forget` and the graph stays fresh on its own.
 //
 // Protocol: JSON-RPC 2.0 over newline-delimited stdin/stdout, MCP
 // version 2024-11-05. Skeleton modeled on samyama-ai/graphrag-rs.
@@ -117,7 +117,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "remember",
-                "description": "Save doc(s) to the local knowledge graph. They become recallable within ~30 min (entity extraction is on a cron; no need to call anything afterwards).\n\nPick one body shape:\n  ✅ `path` — file on disk\n  ✅ `paths_glob` — glob like `/abs/dir/**/*.md`\n  ✅ `paths` — explicit list of files\n  ✅ `content` + `title` — generated/pasted text\n  ❌ Read+forward via `content` — use `path` instead.\n\nBatch response: `results[]`, per-entry `status` ∈ {ingested, duplicate, unsupported, rejected, error}.",
+                "description": "Save doc(s) to the local knowledge graph. Vector recall (`mode=simple`) sees them immediately; graph-aware modes (`default`/`local`/`reason`) need the server-side auto-append to fire — typically ~1 min after the last ingest in a burst.\n\nPick one body shape:\n  ✅ `path` — file on disk\n  ✅ `paths_glob` — glob like `/abs/dir/**/*.md`\n  ✅ `paths` — explicit list of files\n  ✅ `content` + `title` — generated/pasted text\n  ❌ Read+forward via `content` — use `path` instead.\n\nBatch response: `results[]`, per-entry `status` ∈ {ingested, duplicate, unsupported, rejected, error}.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

@@ -108,6 +108,7 @@ let
     OPENAI_API_KEY = cfg.embedding.openai.apiKey;
     QDRANT_URL = cfg.qdrant.url;
     COLLECTION_NAME = cfg.qdrant.collection;
+    APPEND_DEBOUNCE_SECS = toString cfg.autoAppendDebounceSecs;
     RUST_LOG = cfg.logLevel;
   } // ingestEnvVars // cfg.environment;
 
@@ -555,25 +556,37 @@ in
       description = "RUST_LOG value for the server.";
     };
 
-    appendInterval = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "30min";
+    autoAppendDebounceSecs = lib.mkOption {
+      type = lib.types.int;
+      default = 60;
+      example = 30;
       description = ''
-        When set, deploys a `graphrag-rs-append.timer` user unit that
-        periodically POSTs to `/api/graph/append` so newly-ingested
-        documents land in the entity graph without manual intervention.
-        Value is a systemd time-span string (`OnUnitInactiveSec`
-        format) — `"30min"`, `"1h"`, `"2h30min"`, etc.
+        Debounce window for the in-server auto-append coalescer
+        (env var `APPEND_DEBOUNCE_SECS`). Every successful new
+        ingest signals the coalescer; after this many seconds of
+        silence (no new ingests), it runs entity extraction over
+        the delta in-process — same code path that
+        `POST /api/graph/append` calls.
 
-        The timer fires only when the previous tick has finished, so
-        runs never overlap. The append endpoint itself is a fast
-        no-op when nothing has been ingested since the last
-        build/append, so the cron is cheap on idle vaults.
+        * `60` (default) — newly `remember`'d docs become
+          graph-queryable in `default`/`local`/`reason` modes
+          within ~1 min of the last ingest.
+        * Lower (e.g. `15`) — quicker turnaround for interactive
+          ingest at the cost of more LLM calls when ingest
+          patterns drip rather than burst.
+        * `0` — disable the coalescer entirely. Operators then
+          drive append manually via `curl -X POST
+          /api/graph/append` or an external cron.
 
-        Null (default) deploys neither the timer nor its service —
-        agents/users drive append manually via the MCP tool or
-        `curl -X POST /api/graph/append`.
+        Bursts of ingests (e.g. a `pathsGlob` over a folder)
+        collapse into a single append regardless of size — the
+        debounce timer resets on every new arrival, so the loop
+        only fires once the user has stopped typing for the
+        configured window.
+
+        Replaces the previous external `appendInterval` cron
+        (graphrag-rs-append.timer) — see graphrag-rs commit
+        f454955 for the in-server coalescer that supersedes it.
       '';
     };
   };
@@ -657,47 +670,12 @@ in
       };
     };
 
-    # Append timer + oneshot — deployed only when appendInterval is set.
-    # The service does one POST to /api/graph/append; the server-side
-    # fast-path makes this a no-op when nothing's changed, so it's safe
-    # to fire on a tight cadence (default mental model: 30min). Failure
-    # is non-fatal (curl exits non-zero, systemd marks the run failed,
-    # next tick still fires) — the next ingest will trigger the next
-    # append anyway.
-    systemd.user.services.graphrag-rs-append = lib.mkIf (cfg.appendInterval != null) {
-      Unit = {
-        Description = "graphrag-rs: append newly-ingested chunks to the knowledge graph";
-        # Timer waits for graphrag-rs.service to be Active; explicit
-        # Requires/After on the service so a timer tick that fires
-        # before the server is up just queues until it is.
-        Requires = [ "graphrag-rs.service" ];
-        After = [ "graphrag-rs.service" ];
-      };
-      Service = {
-        Type = "oneshot";
-        ExecStart = "${pkgs.curl}/bin/curl -fsS -X POST 'http://${cfg.host}:${toString cfg.port}/api/graph/append' -o /dev/null";
-        # No restart — let the timer drive recurrence.
-        TimeoutStartSec = "1h";
-      };
-    };
-
-    systemd.user.timers.graphrag-rs-append = lib.mkIf (cfg.appendInterval != null) {
-      Unit = {
-        Description = "graphrag-rs: schedule periodic /api/graph/append";
-      };
-      Timer = {
-        # OnUnitInactiveSec means "X after the previous run finished",
-        # which prevents runs from stacking when an append takes longer
-        # than the interval. OnBootSec gives a delayed first fire so
-        # the server has time to come up after boot.
-        OnBootSec = "5min";
-        OnUnitInactiveSec = cfg.appendInterval;
-        Persistent = true;
-        Unit = "graphrag-rs-append.service";
-      };
-      Install = {
-        WantedBy = [ "timers.target" ];
-      };
-    };
+    # Append cron retired in favor of the in-server coalescer
+    # (graphrag-rs commit f454955). graphrag-server now spawns a
+    # background tokio task that wakes on every successful ingest,
+    # debounces by `autoAppendDebounceSecs`, and runs the append
+    # in-process — no curl, no oneshot service, no timer. Set
+    # `autoAppendDebounceSecs = 0` if you want to drive append
+    # entirely externally.
   };
 }
