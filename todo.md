@@ -192,10 +192,57 @@ Shipped fixes:
 - [x] Header doc-comment updated to reflect the four-tool surface.
 
 Follow-ups (not yet shipped):
-- [ ] Pi extensions / coding agent: same tool-description tightening
-      if Pi exposes its own recall wrapper. Audit `pi-ext-rpiv-*`
-      packages for any LLM-facing tool descriptions that drift from
-      the canonical MCP one.
+
+### Pi system-prompt addition: forbid filesystem-chase on vault content
+
+Observed 2026-05-06 (second eval trace): even after the rewritten MCP
+recall description told the agent "FIRST RULE: recall before any
+shell/find/grep" and "the `source` field is for citation, NOT a
+filesystem path", the agent:
+- Called recall, got the right answer with fresh content,
+- Then constructed a filesystem path from the recall's emoji-bearing
+  `source` URI (mangling 🗂️ → 🔒🸀 in the process),
+- Ran `find /home -name "*Yageo*"` for **84.9 seconds**,
+- Read the file directly, re-stating what recall already returned.
+
+The MCP tool description fires only when the agent decides to look at
+tools. By the second turn ("any news on that?") it's running on
+heuristics built from the first turn — and chose `find/grep/read`
+over recall entirely.
+
+Tool-description prose isn't strong enough as a forcing function. The
+fix has to live one level up — at the Pi system prompt, where it
+applies before the agent picks a tool.
+
+Implementation:
+- [ ] Audit how Pi (badlogic/pi-mono via dotfiles `pi-mono.nix`)
+      composes its system prompt. Confirm where to inject a
+      site-specific instruction block.
+- [ ] Add a system-prompt block (verbatim, terse):
+      ```
+      Personal-knowledge questions — about the user's notes, journal,
+      tasks, projects, prior conversations, vault contents — go
+      THROUGH `recall` only. NEVER `find`, `grep`, `read`, `cat`, or
+      `ls` against `/home/data01/Notes/` or any vault path. The
+      recall result IS the answer. Don't filesystem-verify it.
+
+      Allowed exception: the user explicitly asks you to inspect a
+      specific file at a known path.
+
+      Recall's `source` field is a citation URI, not a filesystem
+      path. Never construct a shell path from it.
+      ```
+- [ ] Wire as a Pi extension or dotfiles-managed prompt fragment so
+      it deploys with the rest of the system config and stays in
+      lockstep across hosts.
+- [ ] Verify by replaying the 2026-05-06 trace: agent should answer
+      "any news on yageo?" with one `recall`, no shell. Capture the
+      transcript as a regression test fixture.
+
+Other follow-ups:
+- [ ] Pi extensions / coding agent: tool-description tightening
+      audit on any `pi-ext-rpiv-*` packages that wrap recall. Should
+      drift from the canonical MCP one.
 - [ ] After HippoRAG (Phase 8) ships: re-evaluate the "anti-fan-out"
       hint. Once first-shot recall hit-rate is high, the hint matters
       less; we may be able to relax it.
