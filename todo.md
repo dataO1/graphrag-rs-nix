@@ -161,6 +161,50 @@ internal modules (`incremental.rs`, `core/mod.rs`, `optimization/`,
 `rograg/`) — most of which are themselves dead in Phase 5. Best done
 together with Phase 5 since the cascades overlap.
 
+## Agent UX — MCP/Pi tool descriptions (shipped 2026-05-06)
+
+Observed production failure modes from the 2026-05-06 agent trace:
+- Agent dumped 4448-document `catalog` listing on a "what are my
+  next work tasks?" question. `catalog` was meant for `remember`-path
+  pre-flight ("is this already there?") but agents kept treating it
+  as an LLM-readable filesystem ls.
+- Agent fanned out 6 sequential paraphrased recalls (~46s wall-clock)
+  instead of one-turn parallel; the MCP description's "PARALLELIZE"
+  hint wasn't strong enough.
+- Agent invented a `read main` shell command after seeing
+  `top: main` in a recall result — treated the result `title` as a
+  filesystem path. The response-schema interpretation needed to be
+  explicit in the tool description.
+- After getting a usable recall response, agent re-recalled instead
+  of using the embedded answer — needed clearer "the answer block
+  IS the answer" framing.
+
+Shipped fixes:
+- [x] `catalog` tool removed from MCP (`crates/knowledge-mcp/src/main.rs`).
+      Agents have no business enumerating documents; they recall.
+      Humans use `curl /api/documents` or the gateway plugin.
+- [x] `recall` description rewritten with explicit response shape,
+      "FIRST RULE" (always recall before any shell/find/grep),
+      stronger PARALLELIZE guidance with positive/negative examples,
+      anti-fan-out warning ("if 0 hits, ONE rephrase or report gap;
+      don't auto-paraphrase 5 times"), and explicit "the `source`
+      field is for citation, NOT a filesystem path."
+- [x] Header doc-comment updated to reflect the four-tool surface.
+
+Follow-ups (not yet shipped):
+- [ ] Pi extensions / coding agent: same tool-description tightening
+      if Pi exposes its own recall wrapper. Audit `pi-ext-rpiv-*`
+      packages for any LLM-facing tool descriptions that drift from
+      the canonical MCP one.
+- [ ] After HippoRAG (Phase 8) ships: re-evaluate the "anti-fan-out"
+      hint. Once first-shot recall hit-rate is high, the hint matters
+      less; we may be able to relax it.
+- [ ] Quantitative test harness: replay the 2026-05-06 trace
+      (catalog dump → 6 sequential recalls) against the new tool
+      descriptions to confirm the agent now: (a) skips catalog,
+      (b) issues parallel recalls, (c) doesn't shell out to read
+      result IDs as paths, (d) trusts the answer block.
+
 ## LightRAG quality improvements (deferred — research-backed; revisit later)
 
 Researched 2026-05-06. The dead retrieval submodules (Phase 5 list)
@@ -170,30 +214,46 @@ plain LightRAG dual-level retrieval. Worth resurrecting selectively
 to evolve from). Each is a separate phase with measurable A/B against
 the current LightRAG-only baseline.
 
-### Phase 8 — HippoRAG (Personalized PageRank) seed scoring (~1 day)
+### Phase 8 — HippoRAG (Personalized PageRank) seed scoring [PRIORITY] (~1 day)
 
-Reference: HippoRAG, Yao et al. 2024. Reported **12-19% improvement**
-over plain GraphRAG/RAG on multi-hop benchmarks (MuSiQue,
-2WikiMultihopQA, HotpotQA).
+**Marked as next priority** based on observed recall-quality
+failures in production. Reference: HippoRAG, Yao et al. 2024.
+Reported **12-19% improvement** over plain GraphRAG/RAG on
+multi-hop benchmarks (MuSiQue, 2WikiMultihopQA, HotpotQA).
+
+**Production motivating example (2026-05-06):**
+The agent asked "what are my next work tasks?" against a corpus that
+demonstrably contained the answer (`Tasks` doc, daily journal entries
+with explicit `[ ] todo` checkboxes, `2026-05-06, Wednesday.md` with
+"Debug WCDC due 2026-05-07"). LightRAG dual-keyword + 1-hop expansion
+returned **0 hits on the first attempt**, forcing the agent to
+fan out 5 sequential paraphrased queries, each ~7-8s, total ~40s
+wall-clock. With HippoRAG's PPR personalization the entity-rich
+"todo / task / debug / WCDC" subgraph would have ranked first hit and
+the answer landed in one round.
+
+This is exactly the multi-hop-with-implicit-entity-bridges shape
+HippoRAG was designed for: query mentions abstract concept
+("work tasks"), corpus contains specific entities ("WCDC", "oVirt",
+"Christian", "Debug"), bridges via co-occurrence in dated journal
+entries.
 
 How: combine query→fact similarity (entity weights) with dense passage
 signal (chunk weights) as the personalization vector for PPR over the
 entity graph. Higher-PPR-rank entities + chunks rise to the top of
 the seed set fed to `ask_with_dual_seeds`.
 
-Where it adds value for our vault: questions that need >1-hop
-traversal in the entity graph. LightRAG's existing 1-hop neighbor
-expansion is strong on entity-centric questions; HippoRAG dominates
-on "trace how X relates to Y" / "compare A and B's positions on Z".
-
 Implementation:
-- [ ] Resurrect `retrieval/hipporag_ppr.rs` against the post-Phase-6 API
-      (no in-memory chunks; mention.chunk_id = qdrant block id;
+- [ ] Resurrect `retrieval/hipporag_ppr.rs` against the post-Phase-6
+      API (no in-memory chunks; mention.chunk_id = qdrant block id;
       caller pre-fetches chunk content).
-- [ ] Add MCP `mode: deep` (server `mode: hipporag`). Default for
-      multi-hop questions.
-- [ ] A/B test: 20 multi-hop questions over your vault. Measure
-      hit-rate-on-known-answer + LLM-judge quality.
+- [ ] Add MCP `mode: deep` (server `mode: hipporag`). The MCP
+      description should pitch it as "default for multi-hop questions"
+      and the agent should pick it when the question phrasing is
+      abstract while answers are likely entity-specific.
+- [ ] A/B test against the Yageo / WCDC / "what are my next tasks"
+      corpus. Goal: 0-hit rate drops below 5%, top-1 hit rate ≥ 70%.
+      Measure hit-rate-on-known-answer + LLM-judge quality.
 
 ### Phase 9 — BM25 / sparse retrieval fusion (~1 day)
 

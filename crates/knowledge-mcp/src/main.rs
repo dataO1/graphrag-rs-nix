@@ -1,12 +1,15 @@
 // Stdio MCP server exposing your local knowledge graph.
 //
-// Five tools, mapped onto graphrag-server's REST API:
+// Four tools, mapped onto graphrag-server's REST API:
 //
 //   recall    — search/answer (POST /api/query, mode-parametric)
 //   remember  — ingest (POST /api/documents, polymorphic body)
 //   forget    — delete one document (DELETE /api/documents/:id)
-//   catalog   — list ingested documents (GET /api/documents)
 //   status    — graph counts + last-built timestamp (GET /api/graph/stats)
+//
+// `catalog` was removed: agents misused it to dump 4448-document lists
+// when answering content questions. The right path is always `recall`.
+// Humans who want a doc list use `curl /api/documents` or the gateway.
 //
 // `append_graph` and `build_graph` are NOT exposed: graphrag-server
 // runs an in-process debounced coalescer that wakes on every
@@ -99,11 +102,11 @@ fn tool_definitions() -> Value {
         "tools": [
             {
                 "name": "recall",
-                "description": "Ask the local knowledge graph a question. Returns an LLM-composed answer plus confidence, key entities, and sources.\n\nMode picks retrieval strategy:\n  • `default` — graph-aware hybrid (entity + relationship). Start here.\n  • `thorough` — `default` + raw chunk-vector recall. Use when `default` came back low-confidence and you suspect the answer is in the corpus, or for compound multi-hop questions (\"compare A and B\", \"timeline of X\").\n  • `local` — entity-centric (skips keyword extraction). Use when the question is about a specific named entity already in the graph.\n  • `simple` — vector excerpts, no LLM (~350ms). Use to cheaply check whether the corpus has anything on a topic.\n\nTime/history filters — USE THESE whenever the user asks about \"today\", \"yesterday\", \"since X\", \"this week\", \"what changed\", or wants to compare versions:\n  • `as_of` — RFC 3339 (e.g. `\"2026-05-06T00:00:00Z\"` for \"today\"). Only consider chunks valid at-or-after this time.\n  • `max_versions_per_doc` — defaults to 1 (current only). Set ≥2 for diff-style questions (\"what changed in doc X\") so prior versions are visible.\n\nPARALLELIZE — independent recall questions run server-side without contention. If the user asks about several distinct topics, fire one recall per topic in the same tool batch and wait, instead of serializing them.",
+                "description": "Ask the local knowledge graph a question. Returns an LLM-composed answer + confidence + sources (top-K excerpts) — the answer block IS the answer; you don't need to follow it up with filesystem reads or shell commands.\n\nFIRST RULE: when the user asks about anything stored in their personal knowledge — notes, journal, tasks, projects, prior conversations, vault contents — your FIRST tool call should be `recall`. Never `read`, `find`, `grep`, or shell against `/home/data01/Notes` or anywhere else; the corpus is indexed and the answer is one tool call away.\n\nRESPONSE SHAPE — what you get back:\n```\n{\n  \"answer\":     \"<LLM-composed answer grounded in retrieved chunks>\",\n  \"confidence\": 0.0–1.0,\n  \"results\":    [ { \"title\", \"excerpt\", \"source\", \"lineStart\", \"blockId\", \"etag\", \"lastModified\" }, ... ],\n  \"sources\":    [ { \"id\", \"kind\": \"text_chunk|entity|relationship\", \"excerpt\", \"relevance\" }, ... ],\n  \"keyEntities\": [...],\n  \"reasoningSteps\": [...]\n}\n```\nThe `source` field is a URI for citation provenance (e.g. `obsidian://...`, `file://...`) — DO NOT pass it to a shell `read` or `cat`. If you need more depth, issue another `recall` with a sharper query.\n\nMODES — pick by question shape, not by retry pattern:\n  • `default` — LightRAG hybrid (entity + relationship). 95% of questions go here.\n  • `thorough` — hybrid + chunk-vector. Use for compound questions (\"compare A and B\", \"timeline of X\") OR when the user explicitly says they want a wide search.\n  • `local` — entity-centric, skips keyword extraction. Use when asking about a specific named entity you already know is in the graph.\n  • `simple` — vector excerpts, no LLM (~350ms). Use to cheaply probe whether anything on a topic exists in the corpus.\n\nPARALLELIZE — when the user asks several distinct things, FIRE ALL THE RECALLS IN ONE ASSISTANT TURN. Recall is wait-free server-side; sequential is purely wasted wall-clock time. Example:\n  User: \"What's on my plate this week and what's the status of project X?\"\n  ✅ Two `recall` tool calls in the same response.\n  ❌ One `recall`, wait, read it, then another `recall`.\n\nNON-DETERMINISTIC FAN-OUT — if a single recall returns 0 hits, DO NOT auto-fan-out to 5 paraphrases. That spends LLM budget without raising hit-rate. Instead: try ONE rephrasing with different keywords, or `mode: thorough`, or report the gap to the user and ask what they want.\n\nTIME / HISTORY FILTERS — use whenever the user references time:\n  • `as_of` — RFC 3339 (`\"2026-05-06T00:00:00Z\"` = \"today\"). Only chunks valid at-or-after this time.\n  • `max_versions_per_doc` — defaults to 1 (current only). Set ≥2 for diff-style questions (\"what changed in doc X\").\n\nDO NOT call `status` as a warm-up. Just `recall`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "question": { "type": "string", "description": "Natural-language question. Your phrasing usually retrieves better than aggressive paraphrase." },
+                        "question": { "type": "string", "description": "Natural-language question. Your phrasing often retrieves better than aggressive paraphrase — keep the user's words when possible." },
                         "mode": {
                             "type": "string",
                             "enum": ["default", "thorough", "local", "simple"],
@@ -118,7 +121,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "remember",
-                "description": "Save doc(s) to the local knowledge graph. Recallable shortly after — no follow-up call needed.\n\nPick one body shape:\n  ✅ `path` — file on disk\n  ✅ `paths_glob` — glob like `/abs/dir/**/*.md`\n  ✅ `paths` — explicit list of files\n  ✅ `content` + `title` — generated/pasted text\n  ❌ Read+forward via `content` — use `path` instead.\n\nBatch response: `results[]`, per-entry `status` ∈ {ingested, duplicate, unsupported, rejected, error}.",
+                "description": "Save doc(s) to the local knowledge graph. Recallable within ~minute (entity extraction is async). No follow-up call needed.\n\nPick one body shape:\n  ✅ `path` — single file on disk\n  ✅ `paths_glob` — glob like `/abs/dir/**/*.md`\n  ✅ `paths` — explicit list of files\n  ✅ `content` + `title` — generated/pasted text\n  ❌ Don't read a file in your shell and forward it via `content` — use `path`. The server reads + chunks + embeds + extracts atomically.\n\nResponse: `results[]`, per-entry `status` ∈ {ingested, duplicate, unsupported, rejected, error}. `duplicate` = content_hash already known; safe to ignore.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -140,11 +143,6 @@ fn tool_definitions() -> Value {
                     "properties": { "id": { "type": "string" } },
                     "required": ["id"]
                 }
-            },
-            {
-                "name": "catalog",
-                "description": "Page through what's in the local knowledge graph — id, title, ~160-char excerpt. Capped at 256 entries (use `recall` to drill deeper). Use to discover what's already there before deciding to `remember` something that may already be present.",
-                "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "status",
@@ -200,10 +198,6 @@ async fn call_tool(client: &Client, cfg: &Config, name: &str, args: &Value) -> R
         }
         "status" => {
             let r = client.get(format!("{base}/api/graph/stats")).send().await?;
-            r.error_for_status()?.json::<Value>().await?
-        }
-        "catalog" => {
-            let r = client.get(format!("{base}/api/documents")).send().await?;
             r.error_for_status()?.json::<Value>().await?
         }
         "remember" => {
