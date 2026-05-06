@@ -285,6 +285,127 @@ inside a multi-byte UTF-8 sequence and the runtime SIGABRTed mid-
 extraction (status=6/ABRT). Replaced with a `truncate_excerpt`
 helper that walks `char_indices()` to the nearest grapheme boundary.
 
+## Content quality filtering — boilerplate / templates / stubs (research → proposal)
+
+Researched 2026-05-06. Triggered by the post-Phase-6 cold-start
+re-extraction: ~30% of the 4448 chunks produced 0 entities and 0
+relationships, mostly because they were templated content (daily
+journal habit-lists `Reading / drums / skating / HIIT`, frontmatter
+scaffolding, empty stub notes like "something about WCDC project").
+This is **not primarily a cost optimization** — the LLM cycles are
+cheap. The real problem is **data quality**: when boilerplate does
+extract anything, the entities ("Reading", "drums") become noise
+hubs that pollute recall on unrelated queries.
+
+### The general problem
+
+Three failure modes from low-signal content:
+1. **Storage waste** — chunks that contribute nothing to recall still
+   take vector space and qdrant payload bytes.
+2. **Graph pollution** — entities extracted from boilerplate appear
+   in *every* chunk that contains the boilerplate, inflating their
+   mention counts. Vector search then ranks them above more-relevant
+   but less-frequent entities. Classic IDF-failure mode.
+3. **Recall poisoning** — a query about, say, "skating safety
+   research" surfaces personal-journal entries because the entity
+   "skating" has 400+ mentions there.
+
+### Production references
+
+- **LightRAG** (paper): minimal filtering, relies on LLM extraction
+  quality. Suffers exactly this problem on user-generated corpora.
+- **Microsoft GraphRAG**: community detection partially absorbs
+  boilerplate (it clusters together) but expensive index step.
+- **HippoRAG**: PPR's personalization vector down-weights high-degree
+  hubs naturally — partial mitigation.
+- **LlamaIndex**: ships `KeywordExtractorFilter`, `RelevantTextFilter`,
+  metadata-based filters at the node-postprocessor stage. Heuristic.
+- **Cursor / Continue.dev / code-RAG**: aggressive ingest-time
+  filters — drop generated files, lockfiles, vendor dirs, minified
+  code. Path-glob-driven.
+- **Notion AI, Mem.ai (retired)**: per-user "promotional content"
+  blacklists; UI to mark notes as fleeting/template.
+- **Common Crawl pipelines**: simhash / minhash near-duplicate
+  detection; only extract from one representative per cluster.
+- **Zettelkasten / Obsidian convention**: distinct folders for
+  fleeting vs permanent notes; frontmatter tags
+  (`status: fleeting`).
+
+### Approach taxonomy (from cheap to deep)
+
+**Tier 1 — heuristic ingest-time filters (cheap):**
+- Length floor: skip chunks under N chars after stripping markdown.
+- Frontmatter opt-out: respect `knowledge.skip: true` /
+  `knowledge.priority: low` / `tags: [template, scratch]`.
+- Path-glob exclude: vault config decides
+  `exclude: ["📔 Journal/**", "**/templates/**", "_Drafts/**"]`.
+- Heading-aware: skip `## Habits` blocks, `> [!todo]- Habits`
+  callout blocks (these are Obsidian template markers).
+
+**Tier 2 — statistical noise filters (computed post-ingest):**
+- IDF cap on entity mentions: if entity appears in >K% of chunks,
+  flag as boilerplate; surface entities below the threshold first
+  in vector search.
+- Near-duplicate clustering at chunk-vector level: cosine-similarity
+  hierarchical cluster the entity sidecar; entities whose
+  mention chunks are all near-duplicates get a "boilerplate" flag.
+- Mention-frequency / unique-doc ratio: an entity mentioned 400×
+  but only across 3 unique documents is a template artifact, not
+  a real concept.
+
+**Tier 3 — LLM-based quality gate (more expensive but precise):**
+- Pre-extraction filter: tiny prompt to a cheap model — "Does this
+  chunk contain extractable knowledge or is it template/boilerplate?"
+  → skip if boilerplate. Saves the bigger extraction LLM call.
+- Post-extraction filter: confidence-scored entity output → drop
+  entities below threshold.
+
+**Tier 4 — declarative curation (user-driven):**
+- A `knowledge.toml` per-vault config: include/exclude globs,
+  per-folder defaults, per-extension defaults, per-tag rules.
+- Per-note frontmatter override:
+  `knowledge: { include: false, reason: "personal-only" }`.
+
+### Proposal for graphrag-rs
+
+Tier 1 + Tier 2 + Tier 4 buy ~80% of the win. Tier 3 is overkill
+for a personal-vault scale; revisit if/when we ship to multi-user
+or hosted scenarios.
+
+Discrete items:
+- [ ] **Ingest-time path-glob filtering**: extend `IngestPolicy`
+      (graphrag-server/src/ingest_policy.rs) with `exclude_globs:
+      Vec<String>`. Default for neo-16:
+      `["**/📔 Journal/**", "**/_Templates/**", "**/_Drafts/**"]`
+      configurable in home-manager option.
+- [ ] **Frontmatter opt-out**: parser respects `knowledge.skip:
+      true` and `knowledge.priority: low` (low = ingested, but
+      excluded from entity extraction).
+- [ ] **Length floor**: skip chunks under 50 chars of non-whitespace
+      content. Already partially happens (empty `text` skipped) but
+      should respect a configurable minimum.
+- [ ] **Heading-aware section skip**: detect Obsidian callout blocks
+      `> [!todo]- Habits` and skip their bodies. Same for any
+      sections matching configurable patterns
+      (e.g. `## Habits$`, `## Daily$`).
+- [ ] **Mention-frequency cap on entity sidecar**: at recall time,
+      apply IDF-like down-weighting to entities whose mention count
+      exceeds N% of total chunks. Cheap — just a payload filter
+      adjustment.
+- [ ] **Near-duplicate detection at ingest**: simhash of chunk
+      content; if simhash matches an existing chunk within Hamming
+      distance 3, mark new chunk as `is_duplicate_of: <prior_id>`
+      and skip extraction (point still goes to qdrant for vector
+      search, just doesn't run the LLM). Idempotent + restart-safe.
+- [ ] **Per-vault `knowledge.toml`**: declarative include/exclude
+      overlay. Lives at vault root; loaded once per session;
+      affects both ingest and recall.
+
+Cost: Tier-1 items ~half day each. Tier-2 mention-frequency cap
+~half day. Near-duplicate detection ~1 day (needs simhash impl +
+qdrant payload field). knowledge.toml ~1 day end-to-end (TOML
+schema + loader + plugin pickup + home-manager overlay).
+
 ### Stale-content recall after file edit (open)
 
 User edited a previously-ingested file in Obsidian; subsequent
