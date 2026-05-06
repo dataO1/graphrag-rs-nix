@@ -119,15 +119,16 @@ ok "20 docs seeded"
 curl -fsS -X POST "$BASE/api/graph/append" >/dev/null
 ok "graph built"
 
-# Sanity: warm-up log line fired during hydrate (= /config) AND/OR
-# after the append cycle. The append warm-up is the one that matters
-# for this test.
+# Phase 6 invariant: append should source delta chunks from Qdrant
+# (`list_unextracted_chunks`) — confirmed via the `extend_graph: N
+# delta chunks` log line. With 20 fresh docs ingested and never
+# extracted, the append must process > 0 chunks.
 sleep 0.5
-if grep -qE 'Embedding warm-up complete|warm_up_embeddings' "$LOG"; then
-  ok "warm_up_embeddings invoked"
+if grep -qE 'extend_graph: [1-9][0-9]* delta chunks' "$LOG"; then
+  ok "append sourced delta chunks from Qdrant (Phase 6 flow)"
 else
-  bad "expected warm_up_embeddings call missing from log"
-  grep -i 'warm\|embedding' "$LOG" | tail -5
+  bad "expected 'extend_graph: N delta chunks' log line missing — Phase 6 qdrant-only flow not exercised"
+  grep -i 'extend_graph\|delta' "$LOG" | tail -5
 fi
 
 if [ "$LLM_AVAILABLE" != "1" ]; then

@@ -44,7 +44,7 @@ let
     # `ollama` feature pattern; `openai` was added on the openai-compat
     # branch and gates the OpenAIClient + ChatClient::OpenAI dispatch
     # arm + EmbeddingService's openai branch.
-    cargoExtraArgs = "--locked -p graphrag-server -p graphrag-cli --features graphrag-server/ollama,graphrag-server/openai";
+    cargoExtraArgs = "--locked -p graphrag-server --features graphrag-server/ollama,graphrag-server/openai";
 
     doCheck = false;
   };
@@ -56,13 +56,12 @@ let
   });
 
   server = workspace.overrideAttrs (_: { pname = "graphrag-server"; meta.mainProgram = "graphrag-server"; });
-  cli = workspace.overrideAttrs (_: { pname = "graphrag-cli"; meta.mainProgram = "graphrag-cli"; });
 in
 workspace // {
-  inherit server cli;
+  inherit server;
 
   meta = {
-    description = "Rust GraphRAG implementation (server + CLI), built from dataO1/graphrag-rs:openai-compat fork (vendored fixes + OpenAI-compat embedding backend)";
+    description = "Rust GraphRAG REST server, built from dataO1/graphrag-rs:openai-compat fork (LightRAG dual-level retrieval + OpenAI-compat backends)";
     homepage = "https://github.com/dataO1/graphrag-rs/tree/openai-compat";
     license = lib.licenses.mit;
     platforms = lib.platforms.linux;

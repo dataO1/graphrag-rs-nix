@@ -70,7 +70,6 @@
         packages = {
           inherit graphrag-rs knowledge-mcp knowledge-watcher;
           graphrag-server = graphrag-rs.server;
-          graphrag-cli = graphrag-rs.cli;
           default = graphrag-rs.server;
         };
 

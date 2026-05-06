@@ -99,7 +99,7 @@ fn tool_definitions() -> Value {
         "tools": [
             {
                 "name": "recall",
-                "description": "Ask the local knowledge graph a question. Returns an LLM-composed answer plus confidence, key entities, and sources.\n\nMode picks retrieval strategy:\n  • `default` — graph-aware hybrid (entity + relationship). Start here.\n  • `thorough` — `default` + raw chunk-vector recall. Use when `default` came back low-confidence and you suspect the answer is in the corpus.\n  • `local` — entity-centric (skips keyword extraction). Use when the question is about a specific named entity already in the graph.\n  • `simple` — vector excerpts, no LLM (~350ms). Use to cheaply check whether the corpus has anything on a topic.\n\nSet `reason: true` for compound multi-hop questions (\"compare A and B\", \"timeline of X\"). Slowest path; overrides `mode`.\n\nTime/history filters — USE THESE whenever the user asks about \"today\", \"yesterday\", \"since X\", \"this week\", \"what changed\", or wants to compare versions:\n  • `as_of` — RFC 3339 (e.g. `\"2026-05-06T00:00:00Z\"` for \"today\"). Only consider chunks valid at-or-after this time.\n  • `max_versions_per_doc` — defaults to 1 (current only). Set ≥2 for diff-style questions (\"what changed in doc X\") so prior versions are visible.\n\nPARALLELIZE — independent recall questions run server-side without contention. If the user asks about several distinct topics, fire one recall per topic in the same tool batch and wait, instead of serializing them.",
+                "description": "Ask the local knowledge graph a question. Returns an LLM-composed answer plus confidence, key entities, and sources.\n\nMode picks retrieval strategy:\n  • `default` — graph-aware hybrid (entity + relationship). Start here.\n  • `thorough` — `default` + raw chunk-vector recall. Use when `default` came back low-confidence and you suspect the answer is in the corpus, or for compound multi-hop questions (\"compare A and B\", \"timeline of X\").\n  • `local` — entity-centric (skips keyword extraction). Use when the question is about a specific named entity already in the graph.\n  • `simple` — vector excerpts, no LLM (~350ms). Use to cheaply check whether the corpus has anything on a topic.\n\nTime/history filters — USE THESE whenever the user asks about \"today\", \"yesterday\", \"since X\", \"this week\", \"what changed\", or wants to compare versions:\n  • `as_of` — RFC 3339 (e.g. `\"2026-05-06T00:00:00Z\"` for \"today\"). Only consider chunks valid at-or-after this time.\n  • `max_versions_per_doc` — defaults to 1 (current only). Set ≥2 for diff-style questions (\"what changed in doc X\") so prior versions are visible.\n\nPARALLELIZE — independent recall questions run server-side without contention. If the user asks about several distinct topics, fire one recall per topic in the same tool batch and wait, instead of serializing them.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -109,7 +109,6 @@ fn tool_definitions() -> Value {
                             "enum": ["default", "thorough", "local", "simple"],
                             "default": "default"
                         },
-                        "reason": { "type": "boolean", "default": false, "description": "Decompose into sub-queries; slowest." },
                         "max_results": { "type": "integer", "default": 8, "description": "Top-K seeds. 5-10 typical." },
                         "as_of": { "type": "string", "format": "date-time", "description": "RFC 3339; only consider chunks updated at or after this time. Use for 'what changed since X'." },
                         "max_versions_per_doc": { "type": "integer", "default": 1, "description": "Per source doc, how many recent versions to consider. 1 = current only (default)." }
@@ -162,33 +161,26 @@ async fn call_tool(client: &Client, cfg: &Config, name: &str, args: &Value) -> R
         "recall" => {
             // Single parametric retrieval tool. Maps the agent-facing
             // mode names onto graphrag-server's /api/query mode field.
-            // `reason: true` overrides mode and routes to decomposition.
             //
             // Agent-facing → server mode:
             //   default     → hybrid    (LightRAG paper recommended)
             //   thorough    → mix       (hybrid + raw chunk recall)
             //   local       → local     (entity-vector seeded only)
             //   simple      → search    (vector excerpts, no LLM)
-            //   reason=true → reason    (regardless of mode)
             //
             // The server's `global` mode exists for completeness but
             // is intentionally NOT exposed here — agents reliably
             // misroute to it where `default`/`thorough` answer the
             // same questions equally well.
             let agent_mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("default");
-            let reason = args.get("reason").and_then(|v| v.as_bool()).unwrap_or(false);
-            let server_mode = if reason {
-                "reason"
-            } else {
-                match agent_mode {
-                    "default" => "hybrid",
-                    "thorough" => "mix",
-                    "local" => "local",
-                    "simple" => "search",
-                    other => anyhow::bail!(
-                        "unknown mode: {other} (expected one of: default, thorough, local, simple)"
-                    ),
-                }
+            let server_mode = match agent_mode {
+                "default" => "hybrid",
+                "thorough" => "mix",
+                "local" => "local",
+                "simple" => "search",
+                other => anyhow::bail!(
+                    "unknown mode: {other} (expected one of: default, thorough, local, simple)"
+                ),
             };
             // Forward optional history-aware params verbatim. Default
             // (both unset) preserves the per-doc current-only behavior.

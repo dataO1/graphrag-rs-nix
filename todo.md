@@ -64,36 +64,6 @@ Phase 3 — strip the in-memory embedding API from graphrag-core (shipped):
 - [x] `query_internal` / `query_internal_with_results` no longer call
       the lazy embed; they take `&self`.
 
-Phase 4 — strip the in-memory chunk universe (deferred, ~1 day):
-- [ ] Stop populating the `chunks` collection on the in-memory
-      `KnowledgeGraph` during hydrate. Today `add_document_from_text`
-      re-chunks at character windows just so something gets stored;
-      this is wasted work. Touchy because `seed_processed_chunks`
-      currently feeds off these chunk IDs to prevent re-extraction —
-      need to refactor to use Qdrant block IDs instead.
-- [ ] Refactor `ask_with_dual_seeds` to source chunk content from a
-      caller-supplied lookup (closure or Qdrant client handle) instead
-      of `kg.chunks().find(|c| c.id == cid)`. Caller passes a
-      `ChunkContentResolver` trait object that graphrag-server backs
-      with a Qdrant point fetch.
-- [ ] Drop the `embedding: Option<Vec<f32>>` field from in-memory
-      `Chunk` (lots of internal readers — see incremental.rs,
-      core/mod.rs, optimization/, rograg/; cascading change).
-
-Phase 5 — collapse the standalone retrieval path (deferred, ~half day):
-- [ ] Decide whether QueryMode::Ask / Explain / Reason in
-      graphrag-server are worth keeping. They're not MCP-exposed
-      (MCP collapses to `default`/`thorough`/`local`/`simple` plus
-      optional `reason: true`). They route to `graphrag.ask()` /
-      `ask_explained()` / `ask_with_reasoning()` which all use
-      `hybrid_query` (in-memory chunk vector search → empty results
-      now that warm-up is gone). Either delete the dispatch arms or
-      reroute them through `ask_with_dual_seeds` so they actually
-      work.
-- [ ] If nothing uses `hybrid_query` / `ask` / `ask_explained` /
-      `ask_with_reasoning` after that, delete them too. The codepath
-      for graphrag-server is `extract_query_keywords` + Qdrant seeds +
-      `ask_with_dual_seeds` — everything else is dead.
 
 ## Phase C — Obsidian gateway polish (deferred)
 
