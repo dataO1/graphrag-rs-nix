@@ -2,6 +2,99 @@
 
 Tracks work that's planned but explicitly deferred from the current implementation cycle.
 
+## Drop graphrag-core's in-memory embedding architecture
+
+Researched 2026-05-06. Triggered by the Layer 3 deploy: my `/config`-time
+`warm_up_embeddings()` call blew systemd's ExecStartPost timeout on a 4k+
+doc / 90k+ chunk corpus, putting the unit in a restart loop. Pulling the
+thread revealed the in-memory chunk + entity embedding layer in
+graphrag-core is mostly unused on the actual hot path.
+
+### Two chunk universes today
+
+| Store | Chunks | Embeddings | Used by |
+|---|---|---|---|
+| Qdrant `graphrag` | block-bound, real ingest IDs | ✅ | hybrid/global/mix recall |
+| Qdrant `graphrag-entities` sidecar | — (entity vectors) | ✅ | hybrid keyword search |
+| Qdrant `graphrag-relationships` sidecar | — (rel vectors) | ✅ | hybrid keyword search |
+| graphrag-core in-memory KG (chunks) | re-chunked at character windows | ❌ until warmed | only graphrag-core standalone `ask` / `ask_explained` (which graphrag-server doesn't expose via MCP) |
+| graphrag-core in-memory KG (entities/rels) | restored from Qdrant sidecar | ✅ deserialized | hybrid graph traversal (ID + neighbor lookup, NOT vector search) |
+
+The MCP `recall` default = `hybrid` → `ask_with_dual_seeds`, which seeds
+from Qdrant entity/relationship hits and traverses the in-memory entity
+graph by ID. It does **not** read in-memory chunk or entity embeddings.
+
+### Findings — graph + vector consolidation evaluated, NOT pursued
+
+Evaluated Qdrant-native graph (none), Weaviate cross-refs (slow at 3-hop),
+Neo4j 5+vector (JVM, 2–4 GB heap), Memgraph (in-memory openCypher),
+ArangoDB (BSL relicense), Postgres+pgvector+AGE (AGE sparsely
+maintained), SurrealDB (official Rust client, native graph + HNSW),
+TigerGraph (overkill).
+
+Verdict: **stay on Qdrant + petgraph in-memory entity/relationship
+graph.** At 1,469 edges the graph is ~50 KB, petgraph traversal is
+nanoseconds, no DB beats it. Recall bottleneck is the 50s LLM call —
+shaving microseconds off graph hops is invisible. Migration cost
+> consolidation benefit at this scale.
+
+If we ever consolidate (graph >1M edges or RAM pressure):
+**SurrealDB** is the only candidate matching the stack ethos (single
+Rust binary, official `surrealdb` crate, no JVM). Revisit then.
+
+### Refactor plan
+
+Phase 1 — already shipped:
+- [x] Drop `warm_up_embeddings()` call from `/config` hydrate
+- [x] Layer 3 read-lock + recall semaphore (the warm-up call was a
+      Layer 3 invariant under the old assumption recall reads the
+      in-memory chunk vectors)
+
+Phase 2 — drop the dead code paths from graphrag-server (shipped):
+- [x] Remove `warm_up_embeddings()` calls from `build_graph`,
+      `do_append_graph`, `ingest_blocks`, `ingest_one_text` in
+      `graphrag-server/src/main.rs`. The hot path doesn't read what
+      they populate.
+
+Phase 3 — strip the in-memory embedding API from graphrag-core (shipped):
+- [x] Remove `warm_up_embeddings()` from `GraphRAG` (lib.rs).
+- [x] Remove `add_embeddings_to_graph`, `add_embeddings_parallel`,
+      `add_embeddings_sequential` from `RetrievalSystem`
+      (retrieval/mod.rs).
+- [x] `query_internal` / `query_internal_with_results` no longer call
+      the lazy embed; they take `&self`.
+
+Phase 4 — strip the in-memory chunk universe (deferred, ~1 day):
+- [ ] Stop populating the `chunks` collection on the in-memory
+      `KnowledgeGraph` during hydrate. Today `add_document_from_text`
+      re-chunks at character windows just so something gets stored;
+      this is wasted work. Touchy because `seed_processed_chunks`
+      currently feeds off these chunk IDs to prevent re-extraction —
+      need to refactor to use Qdrant block IDs instead.
+- [ ] Refactor `ask_with_dual_seeds` to source chunk content from a
+      caller-supplied lookup (closure or Qdrant client handle) instead
+      of `kg.chunks().find(|c| c.id == cid)`. Caller passes a
+      `ChunkContentResolver` trait object that graphrag-server backs
+      with a Qdrant point fetch.
+- [ ] Drop the `embedding: Option<Vec<f32>>` field from in-memory
+      `Chunk` (lots of internal readers — see incremental.rs,
+      core/mod.rs, optimization/, rograg/; cascading change).
+
+Phase 5 — collapse the standalone retrieval path (deferred, ~half day):
+- [ ] Decide whether QueryMode::Ask / Explain / Reason in
+      graphrag-server are worth keeping. They're not MCP-exposed
+      (MCP collapses to `default`/`thorough`/`local`/`simple` plus
+      optional `reason: true`). They route to `graphrag.ask()` /
+      `ask_explained()` / `ask_with_reasoning()` which all use
+      `hybrid_query` (in-memory chunk vector search → empty results
+      now that warm-up is gone). Either delete the dispatch arms or
+      reroute them through `ask_with_dual_seeds` so they actually
+      work.
+- [ ] If nothing uses `hybrid_query` / `ask` / `ask_explained` /
+      `ask_with_reasoning` after that, delete them too. The codepath
+      for graphrag-server is `extract_query_keywords` + Qdrant seeds +
+      `ask_with_dual_seeds` — everything else is dead.
+
 ## Phase C — Obsidian gateway polish (deferred)
 
 In-app graph UX inside the gateway plugin. Phase A ships the data layer; Phase C is the human surface.
