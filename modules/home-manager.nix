@@ -121,6 +121,7 @@ let
     COLLECTION_NAME = cfg.qdrant.collection;
     APPEND_DEBOUNCE_SECS = toString cfg.autoAppendDebounceSecs;
     EXTRACTION_CONCURRENCY = toString cfg.extractionConcurrency;
+    RECALL_MAX_CONCURRENT = toString cfg.recallMaxConcurrent;
     GRAPHRAG_HOST = cfg.host;
     GRAPHRAG_PORT = toString cfg.port;
     RUST_LOG = cfg.logLevel;
@@ -733,6 +734,35 @@ in
         Replaces the previous external `appendInterval` cron
         (graphrag-rs-append.timer) — see graphrag-rs commit
         f454955 for the in-server coalescer that supersedes it.
+      '';
+    };
+
+    recallMaxConcurrent = lib.mkOption {
+      type = lib.types.int;
+      default = 1;
+      example = 8;
+      description = ''
+        Number of recalls allowed in flight simultaneously
+        (env var `RECALL_MAX_CONCURRENT`). Sized to match the
+        chat backend's concurrent-slot count:
+
+          • vLLM       — `--max-num-seqs` (DGX Spark default: 8)
+          • llama-server — `--parallel` (default 1; bump for laptop)
+          • OpenAI proper — pick a sensible number well under your
+            org's per-minute quota (e.g. 4-16)
+
+        The recall path is read-locked (see Layer 3: graphrag-core
+        ask/ask_with_reasoning/ask_explained refactored to `&self`,
+        graphrag-server's graph_aware_query takes RwLock::read). N
+        recalls share the read lock; the semaphore is the
+        backpressure cap so a fast client doesn't queue thousands
+        of recalls and starve the chat backend.
+
+        Default `1` preserves pre-Layer-3 behavior (single recall in
+        flight). Bump to your backend's slot count to unlock
+        N-way throughput on hybrid/local/mix/reason modes.
+        Search-mode recall is unaffected — already concurrent at
+        the qdrant + embedding-service level.
       '';
     };
 
