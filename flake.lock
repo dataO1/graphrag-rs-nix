@@ -36,8 +36,8 @@
     "graphrag-rs-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1778075225,
-        "narHash": "sha256-txr5AB2W8lkGfEmkduz2/dHctoWX/wbXL2E/86gLlhQ=",
+        "lastModified": 1778081212,
+        "narHash": "sha256-9Do+GwYYcNNH6fApLN1Zyvr60e9aYZnaBdzNORAur08=",
         "path": "/home/data01/Projects/graphrag-rs",
         "type": "path"
       },
