@@ -97,6 +97,17 @@ let
     INGEST_PREPROCESSOR_URL = cfg.ingest.preprocessorUrl;
   };
 
+  staleContextEnvVars = {
+    STALE_CONTEXT_ENABLE = if cfg.staleContext.enable then "1" else "0";
+    STALE_CONTEXT_EVENT_RETENTION_DAYS = toString cfg.staleContext.eventRetentionDays;
+    STALE_CONTEXT_SESSION_TTL_DAYS = toString cfg.staleContext.sessionTtlDays;
+    STALE_CONTEXT_CLEANUP_INTERVAL_HOURS = toString cfg.staleContext.cleanupIntervalHours;
+    STALE_CONTEXT_MAX_LEASES_PER_SESSION = toString cfg.staleContext.maxLeasesPerSession;
+    STALE_CONTEXT_DELTA_EXCERPT_CHARS = toString cfg.staleContext.deltaExcerptChars;
+  } // lib.optionalAttrs (cfg.staleContext.stateDir != null) {
+    STATE_DIR = cfg.staleContext.stateDir;
+  };
+
   envVars = {
     EMBEDDING_BACKEND = cfg.embedding.backend;
     EMBEDDING_DIM = toString cfg.embedding.dimension;
@@ -113,7 +124,7 @@ let
     GRAPHRAG_HOST = cfg.host;
     GRAPHRAG_PORT = toString cfg.port;
     RUST_LOG = cfg.logLevel;
-  } // ingestEnvVars // cfg.environment;
+  } // staleContextEnvVars // ingestEnvVars // cfg.environment;
 
   mcpClientConfig = pkgs.writeText "knowledge-mcp.json" (builtins.toJSON {
     mcpServers.knowledge = {
@@ -723,6 +734,116 @@ in
         (graphrag-rs-append.timer) — see graphrag-rs commit
         f454955 for the in-server coalescer that supersedes it.
       '';
+    };
+
+    # ---------- Stale-context awareness (event log + lease + SSE) ----
+    # Server-pushed notifications about block changes filtered per
+    # session's lease table. SQLite-backed event log lives at
+    # `${stateDir}/state.sqlite` (XDG state by default). Periodic
+    # cleanup keeps disk usage bounded. See graphrag-rs-nix/todo.md
+    # "Stale-context awareness for shared knowledge graph" for the
+    # full design.
+    staleContext = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Enable the stale-context layer (env var
+          `STALE_CONTEXT_ENABLE`). When on:
+            * SQLite event log + per-session lease table opens at
+              ${"$"}{stateDir}/state.sqlite
+            * `POST /api/recall` accepts a `sessionId` and records
+              `(block_id, etag)` per hit
+            * `POST /api/recall/revalidate` and
+              `GET /api/lease/check` answer "is this still current"
+            * `GET /api/events/stream` streams SSE events to clients
+              filtered by their session's lease table
+            * Periodic cleanup task drops expired events + sessions
+
+          Disable to keep the server narrower (no SQLite, no SSE,
+          recall ignores `sessionId`); the recall path itself is
+          unchanged.
+        '';
+      };
+
+      stateDir = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/var/lib/graphrag-rs";
+        description = ''
+          Directory for graphrag-server's persistent state (the
+          stale-context SQLite file, anything else state-shaped that
+          gets added later). Set as env var `STATE_DIR`. When `null`
+          (default), the server falls back to
+          `${"$"}{XDG_STATE_HOME:-${"$"}HOME/.local/state}/graphrag-rs`.
+        '';
+      };
+
+      eventRetentionDays = lib.mkOption {
+        type = lib.types.int;
+        default = 7;
+        description = ''
+          How long event-log records are kept before deletion
+          (env var `STALE_CONTEXT_EVENT_RETENTION_DAYS`). After this
+          window, clients reconnecting with `Last-Event-ID` past the
+          compaction watermark fall back to a one-shot
+          `lease/check` re-sync.
+
+          Default 7 days bounds disk usage to ~100MB at typical
+          edit rates while covering normal CLI session gaps
+          (laptop suspend, weekend pause, holiday).
+        '';
+      };
+
+      sessionTtlDays = lib.mkOption {
+        type = lib.types.int;
+        default = 7;
+        description = ''
+          How long an idle session lease table is kept before
+          deletion (env var `STALE_CONTEXT_SESSION_TTL_DAYS`).
+          `last_activity` bumps on every recall, so active sessions
+          stay live indefinitely. Abandoned ones get cleaned up.
+        '';
+      };
+
+      cleanupIntervalHours = lib.mkOption {
+        type = lib.types.int;
+        default = 6;
+        description = ''
+          How often the cleanup loop runs (env var
+          `STALE_CONTEXT_CLEANUP_INTERVAL_HOURS`). On each tick:
+            1. Drops events older than `eventRetentionDays`.
+            2. Drops sessions whose `last_activity` is older than
+               `sessionTtlDays` (lease table cascade-deletes).
+            3. Truncates the SQLite WAL so disk usage shrinks.
+            4. Runs an incremental vacuum.
+
+          `0` disables the loop (manual-cleanup-only deployments).
+        '';
+      };
+
+      maxLeasesPerSession = lib.mkOption {
+        type = lib.types.int;
+        default = 1000;
+        description = ''
+          Hard cap on lease entries per session (env var
+          `STALE_CONTEXT_MAX_LEASES_PER_SESSION`). Past the cap,
+          oldest entries (by `retrieved_at`) are FIFO-evicted on
+          insert — bounds runaway long-running sessions without
+          breaking the agent's working set.
+        '';
+      };
+
+      deltaExcerptChars = lib.mkOption {
+        type = lib.types.int;
+        default = 500;
+        description = ''
+          Max chars of `oldExcerpt` / `newExcerpt` per event
+          (env var `STALE_CONTEXT_DELTA_EXCERPT_CHARS`). Truncated
+          with an ellipsis. The unified-diff payload uses the same
+          underlying text but is independently sized by `similar`.
+        '';
+      };
     };
   };
 
