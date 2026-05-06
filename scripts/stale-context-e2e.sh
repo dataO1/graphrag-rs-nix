@@ -169,10 +169,17 @@ if grep -q '"oldEtag":"h1"' "$SSE_OUT" && grep -q '"newEtag":"h1b"' "$SSE_OUT"; 
 else
   bad "etag fields missing in SSE event"
 fi
-if grep -q '"unifiedDiff"' "$SSE_OUT" && grep -q -F '"oldExcerpt":"First paragraph."' "$SSE_OUT"; then
-  ok "SSE event carries delta (excerpts + unified diff)"
+# Schema (post-2026-05-06 cleanup): `updated` events carry ONLY the
+# unified diff — oldExcerpt/newExcerpt would be redundant since the
+# diff already encodes both via `-`/`+` lines. `added` events carry
+# only newExcerpt; `removed` events carry only oldExcerpt.
+if grep -q '"unifiedDiff"' "$SSE_OUT" \
+   && grep -q -F -- 'First paragraph.' "$SSE_OUT" \
+   && grep -q -F -- 'First paragraph EDITED.' "$SSE_OUT"; then
+  ok "SSE event delta = unified diff only (no redundant excerpts)"
 else
-  bad "delta missing in SSE event"
+  bad "delta missing or wrong shape in SSE event"
+  echo "--- SSE output ---"; head -10 "$SSE_OUT"
 fi
 
 # Last-Event-ID resume: pick the id of the previous event, do another
