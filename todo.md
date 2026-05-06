@@ -64,6 +64,103 @@ Phase 3 — strip the in-memory embedding API from graphrag-core (shipped):
 - [x] `query_internal` / `query_internal_with_results` no longer call
       the lazy embed; they take `&self`.
 
+Phase A — rip MS-GraphRAG QueryMode arms (shipped):
+- [x] Delete `QueryMode::Ask` / `Explain` / `Reason` from
+      `graphrag-server/src/models.rs` and the dispatch arms in
+      `graph_aware_query` (main.rs).
+- [x] Drop the `reason: true` flag from MCP `recall` tool description
+      and inputSchema. Multi-hop questions now route through
+      `mode: thorough` (= server `mix` mode).
+
+Phase B — collapse dead retrieval tree in graphrag-core (shipped):
+- [x] Delete `GraphRAG::ask`, `ask_explained`, `ask_with_reasoning`,
+      `query_internal*`, `ask_with_pagerank`,
+      `generate_semantic_answer_from_results`.
+- [x] Delete `RetrievalSystem`'s big dead impl block (~1.3k LOC):
+      `hybrid_query`, `hybrid_query_with_trees`, `legacy_hybrid_query`,
+      `batch_query`, `execute_adaptive_retrieval`, plus all helpers
+      (`vector_similarity_search`, `entity_centric_search`,
+      `hierarchical_search`, etc.).
+- [x] Delete `retrieval/adaptive.rs` (only consumer was the deleted
+      `execute_adaptive_retrieval`).
+- [x] Preserve LightRAG core: `extract_query_keywords`,
+      `ask_with_dual_seeds`, `ask_with_seed_entities`.
+
+Phase B.1 — workspace pruning (shipped):
+- [x] Cargo.toml members reduced to `[graphrag-core, graphrag-server]`.
+- [x] Delete `graphrag-cli`, `graphrag-wasm`, `graphrag_py`,
+      `graphrag` (umbrella), `examples/`, `benches/`, `tests/`.
+- [x] `pkgs/graphrag-rs.nix` cargoExtraArgs drops `-p graphrag-cli`.
+- [x] flake.nix drops the `graphrag-cli` package output.
+- [x] Drop `graphrag-cli` from dotfiles `environment.systemPackages`.
+
+Phase C / 6 — kill the in-memory chunk universe (shipped):
+- [x] Add `entities_extracted_at: Option<i64>` field to qdrant chunk
+      payload (`DocumentMetadata` in `qdrant_store.rs`).
+- [x] Add `QdrantStore::list_unextracted_chunks(limit)` — scrolls
+      `is_current=true AND entities_extracted_at IS NULL`.
+- [x] Add `QdrantStore::mark_chunks_extracted(point_ids, ts)` — bulk
+      payload update after successful LLM extraction.
+- [x] Add `QdrantStore::fetch_chunks_by_ids(point_ids)` — batch
+      content-by-id read for the recall prefetch path.
+- [x] Refactor `GraphRAG::extend_graph(&mut self)` →
+      `extend_graph(&mut self, chunks: &[(ChunkId, String)])`. Caller
+      drives "what to extract"; graphrag-core just consumes chunks
+      and merges entities.
+- [x] Refactor `ask_with_dual_seeds` and `ask_with_seed_entities` to
+      take `chunk_contents: HashMap<ChunkId, String>` from caller.
+- [x] Add `collect_chunk_ids_for_dual_seeds` and
+      `collect_chunk_ids_for_seed_entities` helpers in graphrag-core
+      that walk the entity graph to enumerate chunk ids the recall
+      would touch — used by graphrag-server to prefetch via
+      `fetch_chunks_by_ids`.
+- [x] graphrag-server `do_append_graph` now: query qdrant for
+      unextracted chunks → `extend_graph(&chunks)` →
+      `mark_chunks_extracted` post-hoc.
+- [x] graphrag-server `build_graph` HTTP handler is now a force-
+      rebuild: `clear_graph()` + `extend_graph(all_qdrant_chunks)`
+      + `mark_chunks_extracted(all)`.
+- [x] graphrag-server query dispatch (`Local`, `Hybrid`, `Global`,
+      `Mix`) prefetches chunk content from qdrant via
+      `fetch_chunks_by_ids` before calling the corresponding
+      ask_with_* function.
+- [x] Drop `GraphRAG::add_document_from_text`, `add_document`,
+      `seed_processed_chunks`, `clear_processed_chunks`,
+      `processed_chunk_count`, `build_graph` (sync + async). The
+      `processed_chunks: HashSet<ChunkId>` field is gone.
+- [x] Drop `pipeline_executor` module + standalone constructors
+      (`quick_start`, `quick_start_with_config`,
+      `from_config_and_document`) — all bound to the deleted
+      in-memory chunk path.
+- [x] `/config` hydrate stops re-chunking every doc on every restart.
+      Boot is now seconds, not minutes; ExecStartPost timeout
+      regression resolved.
+- [x] Ingest paths (`ingest_blocks`, `ingest_one_text`) drop the
+      `add_document_from_text` call after qdrant write.
+- [x] Update `recall-parallel-e2e.sh` to assert the new Phase 6 flow
+      (`extend_graph: N delta chunks` log line) instead of the
+      retired `warm_up_embeddings` log line.
+
+Phase 5 — strip remaining MS-GraphRAG submodules (deferred, ~half day):
+
+graphrag-core's `retrieval/` directory still contains submodules
+nobody calls post-Phase 4: `bm25.rs`, `causal_analysis.rs`,
+`enriched.rs`, `hipporag_ppr.rs`, `hybrid.rs`,
+`pagerank_retrieval.rs`, `symbolic_anchoring.rs`. Plus `rograg/`
+(only kept for `From` impls in `core/error.rs`) and
+`query/planner.rs` (dead since `ask_with_reasoning` removal). Plus
+`async_graphrag.rs` (separate parallel async impl, never wired).
+They compile clean today; pruning is a separate cleanup pass.
+
+Phase 7 — strip `KnowledgeGraph::chunks` storage (deferred, ~half day):
+
+The in-memory `KnowledgeGraph` still has a `chunks: …` field, but
+graphrag-server never writes to it after Phase 6. The `Chunk.embedding`
+field is also dead (always None). Removing them cascades through
+internal modules (`incremental.rs`, `core/mod.rs`, `optimization/`,
+`rograg/`) — most of which are themselves dead in Phase 5. Best done
+together with Phase 5 since the cascades overlap.
+
 
 ## Phase C — Obsidian gateway polish (deferred)
 
