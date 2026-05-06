@@ -271,13 +271,24 @@ else
   ok "resume: didn't replay events older than Last-Event-ID"
 fi
 
-# ── Test 4: lease accumulation during live stream ────────────────
-# Open a fresh session C with no prior recalls; open stream first.
+# ── Test 4: mid-stream lease accumulation (the real-world case) ────
+# Session C opens an SSE stream BEFORE making any recall (the typical
+# pi-extension pattern: stream opens on session_start, recall happens
+# later as the user types). Then C leases block w via recall. Then
+# w is edited. The event MUST reach C on the live stream — without
+# any reconnect — because mid-stream leases are the common case,
+# not an edge case.
+#
+# (Pre-fix: this scenario silently dropped the event because the
+# pump cached `current_leases` at stream-open time and only refreshed
+# every 32 events. Confirmed in the wild via pi's lastEventId=0
+# despite events firing for blocks pi had leased.)
 SID_C="00000000-0000-4000-8000-000000000ccc"
 SSE_C=$(mktemp)
 PID_C=$(open_sse "$SID_C" "$SSE_C"); SSE_PIDS="$SSE_PIDS $PID_C"
 sleep 0.5
-# Lease block w (we'll add it). First seed it.
+
+# Seed block w (fresh content, never touched before).
 curl -fsS -X POST "$BASE/api/documents" -H 'Content-Type: application/json' -d "$(cat <<EOF
 {
   "title": "Doc",
@@ -290,21 +301,12 @@ curl -fsS -X POST "$BASE/api/documents" -H 'Content-Type: application/json' -d "
 }
 EOF
 )" >/dev/null
-# C leases w via a recall.
+
+# C leases w (this happens AFTER the stream opened).
 curl -fsS -X POST "$BASE/api/query" -H 'Content-Type: application/json' \
   -d "{\"query\":\"delta\",\"mode\":\"search\",\"topK\":1,\"sessionId\":\"$SID_C\"}" >/dev/null
-# Wait long enough for the SSE pump's lease-rerefresh tick (every 32
-# events). The pump re-reads on lag; we don't have 32 events, so we
-# need to fire more. Easier: rely on the fact that the lease was added,
-# the next event arrival will check current_leases and miss — so we
-# fire 32+ events. For brevity just edit w and wait — if the broadcast
-# fires AND the pump's current_leases hasn't refreshed yet, the event
-# would be filtered out. This validates the worst case.
-#
-# Per the design (run_sse_pump tick % 32), brand-new leases mid-
-# session aren't picked up immediately. That's an acceptable trade-
-# off for v1; the next reconnect (or 32 events later) will catch up.
-# We assert the design as-is rather than aspirational behavior.
+
+# Edit w. This event MUST reach C's live stream.
 curl -fsS -X POST "$BASE/api/documents" -H 'Content-Type: application/json' -d "$(cat <<EOF
 {
   "title": "Doc",
@@ -321,23 +323,11 @@ sleep 2
 kill "$PID_C" 2>/dev/null || true
 wait "$PID_C" 2>/dev/null || true
 
-# Reconnect — server replays from last-seen for C, picks up the
-# w event because the lease is now in the snapshot.
-RESUME_C=$(mktemp)
-curl -fsS --no-buffer --max-time 5 -N \
-  -H "Accept: text/event-stream" \
-  "$BASE/events/stream?session_id=$SID_C" >"$RESUME_C" 2>/dev/null &
-PID_C2=$!
-SSE_PIDS="$SSE_PIDS $PID_C2"
-sleep 4
-kill "$PID_C2" 2>/dev/null || true
-wait "$PID_C2" 2>/dev/null || true
-
-if grep -q '"blockId":"Doc::w"' "$RESUME_C"; then
-  ok "lease accumulation: C got w on reconnect (replay sees new lease)"
+if grep -q '"blockId":"Doc::w"' "$SSE_C"; then
+  ok "mid-stream lease: C received the w event live (no reconnect needed)"
 else
-  bad "C did not get w on reconnect"
-  echo "--- C resume ---"; head -20 "$RESUME_C"
+  bad "mid-stream lease: w event was NOT delivered to C's live stream"
+  echo "--- C live stream output ---"; head -20 "$SSE_C"
 fi
 
 # ── Test 5: concurrent edit BURST ────────────────────────────────
