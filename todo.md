@@ -161,6 +161,149 @@ internal modules (`incremental.rs`, `core/mod.rs`, `optimization/`,
 `rograg/`) — most of which are themselves dead in Phase 5. Best done
 together with Phase 5 since the cascades overlap.
 
+## LightRAG quality improvements (deferred — research-backed; revisit later)
+
+Researched 2026-05-06. The dead retrieval submodules (Phase 5 list)
+weren't all noise — three of them are documented improvements over
+plain LightRAG dual-level retrieval. Worth resurrecting selectively
+**after** Phase 5 deletes the existing implementations (cleanest base
+to evolve from). Each is a separate phase with measurable A/B against
+the current LightRAG-only baseline.
+
+### Phase 8 — HippoRAG (Personalized PageRank) seed scoring (~1 day)
+
+Reference: HippoRAG, Yao et al. 2024. Reported **12-19% improvement**
+over plain GraphRAG/RAG on multi-hop benchmarks (MuSiQue,
+2WikiMultihopQA, HotpotQA).
+
+How: combine query→fact similarity (entity weights) with dense passage
+signal (chunk weights) as the personalization vector for PPR over the
+entity graph. Higher-PPR-rank entities + chunks rise to the top of
+the seed set fed to `ask_with_dual_seeds`.
+
+Where it adds value for our vault: questions that need >1-hop
+traversal in the entity graph. LightRAG's existing 1-hop neighbor
+expansion is strong on entity-centric questions; HippoRAG dominates
+on "trace how X relates to Y" / "compare A and B's positions on Z".
+
+Implementation:
+- [ ] Resurrect `retrieval/hipporag_ppr.rs` against the post-Phase-6 API
+      (no in-memory chunks; mention.chunk_id = qdrant block id;
+      caller pre-fetches chunk content).
+- [ ] Add MCP `mode: deep` (server `mode: hipporag`). Default for
+      multi-hop questions.
+- [ ] A/B test: 20 multi-hop questions over your vault. Measure
+      hit-rate-on-known-answer + LLM-judge quality.
+
+### Phase 9 — BM25 / sparse retrieval fusion (~1 day)
+
+Why: dense embeddings flatten rare/technical terms (model names like
+`Qwen3.6-27B-Text-NVFP4-MTP`, NixOS module names, Obsidian tags,
+code identifiers). BM25 nails them. Reciprocal Rank Fusion (RRF) of
+BM25 + dense is the production-RAG default (ColBERT-X, RankGPT,
+every commercial vector-DB benchmark).
+
+Where it adds value for our vault: code snippets, NixOS configs,
+machine-specific identifiers, jargon — anything dense embeddings
+tend to confuse with semantically-similar-but-wrong neighbors.
+
+Implementation:
+- [ ] Decide path: (a) qdrant's built-in keyword search via tantivy
+      backend, (b) tantivy index alongside qdrant, (c) graphrag-core's
+      existing `retrieval/bm25.rs` module ported to Phase-6 API.
+- [ ] Wire RRF fusion at the seed-finding step in
+      `graph_aware_query`: dense entity-vector + BM25 keyword over
+      entity sidecar names → fuse → top-K seeds.
+- [ ] Same for relationship sidecar (high-level keyword stream).
+- [ ] A/B test: 20 questions with rare proper nouns / identifiers.
+
+### Phase 10 — Query decomposition mode (~half day)
+
+Why: LightRAG `mix` mode adds chunk-vector seeds but doesn't
+*decompose* compound questions. "Compare how Kafka and Pulsar handle
+backpressure" benefits from running each subquery through
+`ask_with_dual_seeds` independently, then synthesizing.
+
+The existing `query/planner.rs` was driving the deleted
+`ask_with_reasoning` and itself got removed in the Phase 5 sweep
+(planned). Resurrect against Phase-6 API.
+
+Implementation:
+- [ ] Add MCP `mode: compound` (server `mode: decompose`).
+- [ ] LLM call 1: split query into N independent subqueries.
+- [ ] Per-subquery: extract_query_keywords → seed search →
+      ask_with_dual_seeds (parallelizes nicely under Layer 3).
+- [ ] LLM call 2: synthesize across subquery answers.
+- [ ] A/B test: compound questions ("compare X and Y",
+      "timeline of Z").
+
+### Skipped from the dead-module list
+
+- `retrieval/symbolic_anchoring.rs` (CatRAG) — moderate value for
+  philosophy/concept-heavy corpora; low value for our (mostly
+  technical) vault. Skip.
+- `retrieval/causal_analysis.rs` — needs entity timestamps in
+  payload; revisit if/when temporal queries become a workload.
+- `retrieval/pagerank_retrieval.rs` (plain PageRank) — subsumed by
+  HippoRAG; if we do PPR we do HippoRAG.
+- `retrieval/enriched.rs` — already covered by qdrant payload
+  filters + block-aware ingest.
+- `rograg/` — heavy logic-form parser subsystem; modern LLMs do
+  query parsing zero-shot well enough; dubious ROI vs maintenance.
+- `async_graphrag.rs` — runtime, not algorithm; Layer 3 already
+  delivers parallelism.
+
+## Operational issues from 2026-05-06 deploy (action items)
+
+### Phase C deploy fallout — first-time `entities_extracted_at` backfill
+
+**Root cause**: pre-Phase-6 qdrant payloads have no
+`entities_extracted_at` field. The new `list_unextracted_chunks`
+filter (`is_current=true AND entities_extracted_at IS NULL`)
+matches **all 4448** existing chunks on first /api/graph/append
+post-deploy. Server tried to re-extract everything via vLLM at
+:17170 — many minutes of LLM work, lots of `JSON repair failed`
+warnings on the Obsidian-emoji-heavy chunks.
+
+**Decision**: do NOT wipe the qdrant collection. The re-extraction
+is correct behavior given the schema migration; the system
+self-heals as chunks complete. A one-shot backfill would be faster
+but adds operational complexity for marginal benefit.
+
+Optional future work:
+- [ ] One-shot backfill script: scroll qdrant, set
+      `entities_extracted_at = now()` on every is_current=true
+      chunk that lacks the field. Skips the cold-start re-extraction.
+      Useful next time we ship a similar payload-schema migration.
+
+### UTF-8 char-boundary panic in excerpt formatter (FIXED)
+
+`graphrag-server/src/main.rs:912` (and :767, :839) sliced excerpts
+by byte: `&s[..200]`. With your vault's heavy emoji usage
+(`🗂️`, `📔`, `🗒️`, `✅`), the 200-byte boundary frequently fell
+inside a multi-byte UTF-8 sequence and the runtime SIGABRTed mid-
+extraction (status=6/ABRT). Replaced with a `truncate_excerpt`
+helper that walks `char_indices()` to the nearest grapheme boundary.
+
+### Stale-content recall after file edit (open)
+
+User edited a previously-ingested file in Obsidian; subsequent
+`recall` returned the old stub content. No SSE notification fired
+to the agent session. Three things to investigate:
+
+- [ ] Does the Obsidian gateway plugin actually send the modified
+      file? (Check plugin's diff logic — block-hash dedup might be
+      treating it as unchanged.)
+- [ ] Does qdrant's supersede logic flip `is_current=false` on the
+      old chunk after upsert? Look at the
+      `mark_block_superseded` / `find_current_block` path under
+      block-form ingest in main.rs:~1300-1400.
+- [ ] SSE delivery: agent (claude-code session) doesn't subscribe
+      to /api/events/stream by default. Stale-context layer ships
+      events but no client listens. Either wire the MCP to
+      auto-subscribe on session start, or add an `agent` extension
+      that does.
+
 
 ## Phase C — Obsidian gateway polish (deferred)
 
