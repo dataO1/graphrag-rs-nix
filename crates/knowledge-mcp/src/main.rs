@@ -99,7 +99,7 @@ fn tool_definitions() -> Value {
         "tools": [
             {
                 "name": "recall",
-                "description": "Ask the local knowledge graph a question. Returns an LLM-composed answer plus confidence, key entities, and sources.\n\nMode picks retrieval strategy:\n  • `default` — graph-aware hybrid (entity + relationship). Start here.\n  • `thorough` — `default` + raw chunk-vector recall. Use when `default` came back low-confidence and you suspect the answer is in the corpus.\n  • `local` — entity-centric (skips keyword extraction). Use when the question is about a specific named entity already in the graph.\n  • `simple` — vector excerpts, no LLM (~350ms). Use to cheaply check whether the corpus has anything on a topic.\n\nSet `reason: true` for compound multi-hop questions (\"compare A and B\", \"timeline of X\"). Slowest path; overrides `mode`.\n\nHistory: by default returns the *current* version of each doc only. For \"what changed since X\" set `as_of` (RFC 3339); to compare versions of the same doc set `max_versions_per_doc > 1`.",
+                "description": "Ask the local knowledge graph a question. Returns an LLM-composed answer plus confidence, key entities, and sources.\n\nMode picks retrieval strategy:\n  • `default` — graph-aware hybrid (entity + relationship). Start here.\n  • `thorough` — `default` + raw chunk-vector recall. Use when `default` came back low-confidence and you suspect the answer is in the corpus.\n  • `local` — entity-centric (skips keyword extraction). Use when the question is about a specific named entity already in the graph.\n  • `simple` — vector excerpts, no LLM (~350ms). Use to cheaply check whether the corpus has anything on a topic.\n\nSet `reason: true` for compound multi-hop questions (\"compare A and B\", \"timeline of X\"). Slowest path; overrides `mode`.\n\nTime/history filters — USE THESE whenever the user asks about \"today\", \"yesterday\", \"since X\", \"this week\", \"what changed\", or wants to compare versions:\n  • `as_of` — RFC 3339 (e.g. `\"2026-05-06T00:00:00Z\"` for \"today\"). Only consider chunks valid at-or-after this time.\n  • `max_versions_per_doc` — defaults to 1 (current only). Set ≥2 for diff-style questions (\"what changed in doc X\") so prior versions are visible.\n\nPARALLELIZE — independent recall questions run server-side without contention. If the user asks about several distinct topics, fire one recall per topic in the same tool batch and wait, instead of serializing them.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -149,7 +149,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "status",
-                "description": "Counts of documents, entities, relationships, vectors plus `lastBuiltAt`. Cheap. Use to sanity-check the graph isn't empty before a `recall`.",
+                "description": "Graph counts (documents, entities, relationships, vectors) + `lastBuiltAt`. DO NOT call as a warm-up before `recall` — only call when the user explicitly asks about graph size/build state, or to disambiguate empty-corpus vs no-match after a 0-hit recall.",
                 "inputSchema": { "type": "object", "properties": {} }
             }
         ]

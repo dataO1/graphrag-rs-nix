@@ -1,0 +1,9 @@
+{
+  "id": "graphrag-gateway",
+  "name": "GraphRAG Gateway",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Obsidian as gateway to a local graphrag-rs knowledge graph. Indexes vault changes via vault.on() events (no inotify false-positives), exposes a small HTTP gateway so MCP clients can recall/remember through Obsidian, and supports surgical block-level re-ingestion on edit.",
+  "author": "Daniel Tabellion",
+  "isDesktopOnly": true
+}
