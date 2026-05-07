@@ -66,9 +66,30 @@ let
     };
   };
 
+  # Adaptive AIMD concurrency for chat-LLM upstream calls. Posted into
+  # the pipeline JSON's `llm` block; graphrag-core builds an
+  # `AdaptiveSemaphore` from this and gates every chat-completion call.
+  # Backend-agnostic: when the active upstream is fast (Spark vLLM with
+  # batching) the cap stays at `max`; when it falls back to a single-slot
+  # local llama-server, AIMD halves the cap on the first timeout and
+  # settles at 1 within seconds. Set `cfg.llm.enable = false` to omit
+  # the block entirely (graphrag-core uses its own struct defaults of
+  # 64/64/10/0.5/500).
+  llmPipelineConfig = lib.optionalAttrs cfg.llm.enable {
+    llm = {
+      initial = cfg.llm.initial;
+      max = cfg.llm.max;
+      success_threshold = cfg.llm.successThreshold;
+      failure_decay = cfg.llm.failureDecay;
+      shrink_cooldown_ms = cfg.llm.shrinkCooldownMs;
+    };
+  };
+
   effectivePipelineConfig =
     let
-      base = lib.recursiveUpdate embeddingsPipelineConfig chatPipelineConfig;
+      base = lib.recursiveUpdate
+        (lib.recursiveUpdate embeddingsPipelineConfig chatPipelineConfig)
+        llmPipelineConfig;
     in
     if cfg.pipelineConfig != null then
       lib.recursiveUpdate base cfg.pipelineConfig
@@ -120,7 +141,11 @@ let
     QDRANT_URL = cfg.qdrant.url;
     COLLECTION_NAME = cfg.qdrant.collection;
     APPEND_DEBOUNCE_SECS = toString cfg.autoAppendDebounceSecs;
-    EXTRACTION_CONCURRENCY = toString cfg.extractionConcurrency;
+    # Note: extraction concurrency is no longer an env var. The
+    # adaptive-AIMD controller in graphrag-core gates every chat-LLM
+    # call from `services.graphrag-rs.llm.*` (POSTed via /config) and
+    # auto-tunes within `[1, max]` based on observed
+    # transport-success/failure. See the `llm` submodule below.
     RECALL_MAX_CONCURRENT = toString cfg.recallMaxConcurrent;
     GRAPHRAG_HOST = cfg.host;
     GRAPHRAG_PORT = toString cfg.port;
@@ -675,32 +700,92 @@ in
       };
     };
 
-    extractionConcurrency = lib.mkOption {
-      type = lib.types.int;
-      default = 4;
-      example = 8;
-      description = ''
-        Cap on concurrent in-flight LLM entity-extraction calls
-        (env var `EXTRACTION_CONCURRENCY`). graphrag-core's
-        per-chunk extraction runs through `buffer_unordered`; this
-        knob bounds how many chunks can be hitting the chat backend
-        at the same time.
+    llm = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Whether to post the `llm.*` block to `/config` at startup.
+          When false, graphrag-core uses its built-in struct defaults
+          (initial=64, max=64, successThreshold=10, failureDecay=0.5,
+          shrinkCooldownMs=500). Disable only if you need to fully
+          drive concurrency from a hand-written `pipelineConfig`.
+        '';
+      };
 
-        **Match this to the chat backend's parallel-slot count.** For
-        llama-server: `services.llama-servers.<name>.parallel`. For
-        vLLM: `--max-num-seqs`. Going higher than the backend's slot
-        count just queues requests and adds latency; lower wastes
-        GPU throughput.
+      initial = lib.mkOption {
+        type = lib.types.int;
+        default = 64;
+        example = 4;
+        description = ''
+          Initial permit count at server start. graphrag-server
+          probes the chat upstream's `GET /props` endpoint
+          (llama.cpp's properties API, returns `total_slots`) and
+          if successful uses that value instead of this default —
+          so on llama.cpp `--parallel 1` you'd start at 1 even if
+          this is 64. Other backends (vLLM, real OpenAI, nginx
+          routers without /props passthrough) silently fall back to
+          this static value, and the AIMD controller discovers
+          actual capacity within a few minutes regardless.
+        '';
+      };
 
-        Per-call ctx requirement is ~4K tokens (chunk 512 + prompt
-        ~350 + output cap 1.5K + 20% margin, clamped to floor 4096).
-        Per-slot ctx on llama-server = `--ctx-size / --parallel`;
-        ensure that's ≥ 4K (and ideally ≥ 8K for healthy headroom on
-        recall calls that share the same backend).
+      max = lib.mkOption {
+        type = lib.types.int;
+        default = 64;
+        example = 32;
+        description = ''
+          Hard cap on permits. The adaptive controller never grows
+          the in-flight budget above this value. Sized to whichever
+          upstream (Spark vLLM at NVFP4, local llama-server, OpenAI
+          API quota) you most often run against — overshooting is
+          harmless when the upstream supports it, undershooting
+          leaves throughput on the table.
 
-        On a 90K/parallel=4 layout each slot gets 22.5K — comfortable
-        for both extraction and graph-aware recall.
-      '';
+          With 64 permits + APPEND_BATCH_SIZE=64, a healthy Spark
+          vLLM (`--max-num-seqs=64`, NVFP4, PagedAttention) processes
+          a full extraction batch in roughly the time it takes to
+          run one chunk — order-of-magnitude better than the local
+          fallback's `--parallel 1` sequential mode.
+        '';
+      };
+
+      successThreshold = lib.mkOption {
+        type = lib.types.int;
+        default = 10;
+        description = ''
+          Number of consecutive successful chat completions before
+          the AIMD controller grows the permit cap by 1. Lower
+          values climb faster after a recovery (e.g. Spark coming
+          back from a network blip) but are noisier; higher values
+          are stickier.
+        '';
+      };
+
+      failureDecay = lib.mkOption {
+        type = lib.types.float;
+        default = 0.5;
+        description = ''
+          Multiplicative-decrease factor on transport failure
+          (timeout, connection error, 429, 5xx). 0.5 halves the
+          permit cap; 0.25 quarters it. Floored at 1 permit.
+          JSON-parse / repair failures do NOT trigger decay
+          (those are a quality issue, not a capacity issue).
+        '';
+      };
+
+      shrinkCooldownMs = lib.mkOption {
+        type = lib.types.int;
+        default = 500;
+        description = ''
+          Minimum gap between consecutive shrinks. Without this,
+          a burst of N simultaneous in-flight requests all timing
+          out (e.g. when Spark drops mid-batch) would halve N times
+          and over-shrink. With a 500ms cooldown, only the first
+          shrinks; subsequent failures inside the window are
+          ignored. The next batch then probes from the lower cap.
+        '';
+      };
     };
 
     autoAppendDebounceSecs = lib.mkOption {
