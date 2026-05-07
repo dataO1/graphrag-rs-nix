@@ -2,6 +2,106 @@
 
 Tracks work that's planned but explicitly deferred from the current implementation cycle.
 
+## Risks introduced by the streaming extract↔embed pipeline (2026-05-07)
+
+Followups for the cross-page-pipelined `do_append_graph` that ships
+in graphrag-rs commit `<TBD>`. Architecture:
+
+  Producer (graphrag-core `extend_graph_streaming`)
+    → mpsc::channel(64) of `ChunkExtractionDelta`
+    → Consumer (tokio::spawn'd in graphrag-server, embeds via OVMS
+                concurrent-8, upserts to qdrant in 32-item flushes)
+
+Per-batch consumer hands off across pages: while batch N's consumer
+is still draining, batch N+1's LLM extraction starts.
+`list_unextracted_chunks_excluding(N+1, prev_batch_ids)` keeps the
+in-flight set out of the next page. Mark-extracted for batch N
+happens after its consumer drains, before the iteration that holds
+batch N+1's consumer as the new prev.
+
+### Risks tracked
+
+1. **Consumer panic safety — `mark_chunks_extracted` skipped on
+   prev-consumer failure.** If `persist_touched_snapshot` errors
+   inside the consumer task and the JoinHandle returns Err, the loop
+   logs a warning and skips marking the prev batch's chunks
+   extracted. They re-appear on the next /api/graph/append cycle and
+   re-extract idempotently (merge_entity dedupes). **Self-healing,
+   acceptable.** But: the in-memory graph already has the entities
+   merged for that batch. Recall against that snapshot sees them;
+   recall against qdrant doesn't (their entity-vector rows aren't
+   persisted). Drift is bounded — next cycle re-extracts and
+   re-persists. Worth adding a `tracing::error!` instead of `warn!`
+   when this happens so it's visible in the journal.
+
+2. **Two consumers in flight at once × OVMS contention.** The cross-
+   page pipeline holds prev_consumer (still embedding batch N) AND
+   the new consumer (just spawned for batch N+1, which won't get
+   data until batch N+1's LLM finishes — 8+ min). So in steady state
+   it's only ever ONE consumer doing actual OVMS work at a time.
+   Edge case: if a batch's LLM finishes faster than expected
+   (cached prompt prefix, all-empty extractions), the new
+   consumer's first deltas hit OVMS while the prev is still
+   draining. Both share the OVMS NPU bottleneck → no extra
+   throughput, just additional queue depth at OVMS. Bounded by the
+   buffer_unordered(8) cap inside each consumer's
+   `generate_with_openai`, so peak concurrent OVMS calls ≤ 16.
+   OVMS handles that fine. **Acceptable.**
+
+3. **No automated test coverage for the streaming path.** Bench-
+   validated only. If a refactor breaks the per-chunk dedupe set,
+   the channel-close semantic, or `mark_chunks_extracted` ordering,
+   we'd discover in production. **Add an integration test:** start
+   graphrag-server against a sandbox qdrant, ingest N test docs,
+   POST /api/graph/append, assert (a) all chunks marked extracted,
+   (b) entity sidecar count grew by N_entities, (c) RSS stayed
+   under 1 GB through the run.
+
+4. **In-memory graph drift on partial failure.** `extend_graph`
+   merges entities into the master IN PLACE during LLM extraction.
+   If the consumer fails to persist some of those, the entities are
+   in the master snapshot (Layer 4 ArcSwap) but not in qdrant. A
+   recall using mode=default (graph-aware, reads master) sees them;
+   a recall using mode=simple (vector, reads qdrant) doesn't. Next
+   cycle re-extracts → re-persists → consistent again. The drift
+   window is bounded to one /api/graph/append cycle. **Acceptable.**
+   Worth a small status endpoint that surfaces "in-memory entity
+   count vs qdrant entity count" for visibility.
+
+5. **Channel capacity (64) is a hard cap on extraction-vs-embed
+   imbalance.** Today embed is faster than LLM extraction by ~5×,
+   so the channel never fills. If the LLM ever gets dramatically
+   faster (Spark hardware bump, MTP enabled) AND embedding stays
+   the same speed, the channel could fill, blocking the merge loop.
+   Backpressure is the *correct* behavior — the alternative is OOM
+   — but the user-facing symptom would be "extraction stalls
+   during persistence." Mitigations: bump capacity OR scale OVMS
+   concurrency. **Track but don't fix preemptively.**
+
+6. **The "embed text" for an entity is `"name (type)"`. If the LLM
+   ever returns the same name+type with different descriptions
+   across chunks, the dedupe-by-id collapses them — only the FIRST
+   surfacing's description gets embedded.** The current
+   merge_entity strategy is "richer-mentions wins, first-seen
+   description wins". Whether that's the right semantic for
+   embedding is uncertain. Today it's not visibly wrong because
+   our `EmbeddingsResponse` text is just `name (type)` not
+   description; description doesn't affect the vector. But if we
+   ever switch to embedding the description, this becomes load-
+   bearing. **Note for if/when description embedding gets enabled.**
+
+7. **No retry on transport failures inside the consumer.** The
+   inner `persist_touched_snapshot` call can fail on transient
+   OVMS or qdrant errors (network blip, OVMS restart, qdrant
+   compaction stall). Currently the consumer logs and continues
+   draining, but those flush's items are lost from the qdrant
+   side (not retried). They'll re-extract next cycle, but the
+   write-amplification stings at scale. **Add per-flush retry:**
+   on transient error, re-queue items into next flush; on
+   permanent error, surface to the caller.
+
+
+
 ## Drop graphrag-core's in-memory embedding architecture
 
 Researched 2026-05-06. Triggered by the Layer 3 deploy: my `/config`-time
@@ -880,6 +980,50 @@ lease table + auto-revalidating SSE stream + delta payloads is
 genuinely green-field. Worth landing as a graphrag-rs feature,
 possibly with upstream contribution to the MCP spec for the
 chunk-ETag + resume-via-cursor convention.
+
+## Memory writes via Obsidian instead of direct graphrag ingest (idea — needs research)
+
+Today the `remember` MCP tool (and the Pi toolcall equivalent) write
+straight into the graphrag service for ingest. The graph ends up as
+the only durable store of those memories — opaque vectors + entity
+records, not human-readable prose anywhere on disk.
+
+Alternative: route memory writes through the Obsidian vault first.
+The MCP/Pi toolcall composes a markdown note (frontmatter + body),
+drops it in a `_Memory/` (or similar) folder, and lets the existing
+gateway plugin → graphrag ingest path pick it up like any other note.
+
+Wins if it works:
+- Memories exist as plain markdown files. User can read, edit,
+  delete them by hand. Other agents (any tool that can read the
+  vault) can grep/recall/cite the full text without going through
+  graphrag.
+- Single source of truth for "knowledge the user has accumulated";
+  no divergence between vault content and graph-only content.
+- Edits to a memory note flow through the same supersede /
+  block-hash path as any other doc — no separate update API.
+
+Open questions to research:
+- Where do memory notes live? Dedicated folder vs frontmatter tag?
+  Dedicated folder is cleanest for `exclude_globs` if the user
+  wants to opt out per-vault.
+- Note shape: one note per memory (matches MEMORY.md / per-file
+  layout used for Claude Code auto-memory) or daily-aggregated?
+  Per-memory is more diff-friendly and easier to delete.
+- How does the `remember` tool name files? Slug from a one-line
+  summary? Hash? Datestamp prefix?
+- Round-trip: when `remember` is called from a session that's not
+  inside the vault host, how does the note get written? Gateway
+  plugin's HTTP API would need a "create note" endpoint, or
+  graphrag-server gains a write-through-to-vault path.
+- Latency: writing a markdown file + waiting for the gateway to
+  ingest is slower than direct graphrag ingest. Acceptable?
+- Conflict with the graphrag-rs `remember` tool's current
+  semantics — does it become an alias for "create vault note +
+  ingest" or stay as a separate fast path?
+
+This is a research idea, not a planned phase. Revisit after the
+near-term agent-UX and HippoRAG work settles.
 
 ## Repo restructuring (longer term)
 
