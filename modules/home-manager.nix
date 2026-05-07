@@ -56,6 +56,8 @@ let
       backend = cfg.embedding.backend;
       dimension = cfg.embedding.dimension;
       fallback_to_hash = false;
+      max_concurrent = cfg.embedding.maxConcurrent;
+      flush_threshold = cfg.embedding.flushThreshold;
     } // lib.optionalAttrs (cfg.embedding.backend == "openai") {
       api_endpoint = cfg.embedding.openai.url;
       model = cfg.embedding.openai.model;
@@ -270,6 +272,45 @@ in
           with a dim mismatch. Common values: 384 (MiniLM), 768
           (nomic-embed-text, bge-base), 1024 (mxbai, bge-m3, bge-large),
           4096 (Qwen3-Embedding-8B native).
+        '';
+      };
+
+      maxConcurrent = lib.mkOption {
+        type = lib.types.int;
+        default = 16;
+        description = ''
+          Maximum in-flight embedding HTTP requests dispatched in parallel
+          by graphrag-server's per-flush embedder (the OVMS-friendly
+          single-text-per-POST fan-out at graphrag-server/src/embeddings.rs).
+
+          Was previously hardcoded to 8. NPU-bound backends (OVMS on a
+          single NPU device) saturate around 8–16; the NPU is the
+          bottleneck, but extra concurrency still buys some
+          preprocess+compute+postprocess pipelining. Bandwidth-bound
+          vLLM embedding endpoints can handle 32+. Default 16. Lower
+          this if you see OVMS HTTP timeouts; raise it if OVMS reports
+          idle GPU/NPU time during a heavy ingest.
+        '';
+      };
+
+      flushThreshold = lib.mkOption {
+        type = lib.types.int;
+        default = 64;
+        description = ''
+          Streaming-pipeline flush threshold: graphrag-server's
+          /api/graph/append consumer accumulates touched entities +
+          relationships from in-flight LLM extractions and triggers one
+          embed-and-Qdrant-upsert flush when
+          `entities.len() + rels.len() >= flushThreshold`.
+
+          Larger = fewer Qdrant round-trips, larger embedding batches per
+          flush (better OVMS throughput), slightly more in-memory buffer
+          pressure on the consumer side. Smaller = lower flush latency,
+          more frequent Qdrant writes.
+
+          Pairs with `maxConcurrent`: a 64-item flush against
+          `maxConcurrent = 16` is 4 sequential rounds of 16 in-flight
+          embedding posts. Default 64. Was previously hardcoded to 32.
         '';
       };
 
