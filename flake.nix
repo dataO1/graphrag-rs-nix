@@ -18,11 +18,13 @@
     # /api/documents resource-merge) plus the new OpenAI-compatible embedding
     # backend. Bump to local path during iteration.
     graphrag-rs-src = {
-      # Local path during iteration on the path-ingest patch (commit
-      # cb1c928 on openai-compat). Once pushed to dataO1/graphrag-rs
-      # and verified, flip back to:
+      # Local iteration on the openai-compat branch. git+file:// instead of
+      # path:/ so the 34 GB cargo target/ tree isn't copied into the Nix store
+      # on every flake bump — git+file uses only tracked files (target/ is
+      # gitignored). Working tree must be committed before each bump.
+      # Once pushed to dataO1/graphrag-rs and verified, flip back to:
       #   url = "github:dataO1/graphrag-rs/openai-compat";
-      url = "path:/home/data01/Projects/graphrag-rs";
+      url = "git+file:///home/data01/Projects/graphrag-rs?ref=openai-compat";
       flake = false;
     };
   };
