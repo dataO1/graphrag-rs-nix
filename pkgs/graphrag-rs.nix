@@ -7,7 +7,6 @@
 , protobuf
 , cmake
 , perl
-, mold
 }:
 
 # graphrag-rs (server + cli) built from our `dataO1/graphrag-rs` fork on
@@ -33,26 +32,27 @@ let
     version = "0.1.0";
     strictDeps = true;
 
-    nativeBuildInputs = [ pkg-config protobuf cmake perl mold ];
+    nativeBuildInputs = [ pkg-config protobuf cmake perl ];
     buildInputs = [ openssl ];
 
     PROTOC = "${protobuf}/bin/protoc";
     OPENSSL_NO_VENDOR = "1";
 
-    # mold is 5–10× faster than the default ld for big Rust binaries.
-    # No runtime cost — same machine code, faster final link. cc is in
-    # PATH via the standard nixpkgs build env; mold is in nativeBuildInputs.
-    RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
-
     # Iteration-tuned overrides for the workspace Cargo.toml's
     # [profile.release] block. cgu=16 lets the LLVM backend parallelise
-    # codegen across CPUs (the previous cgu=1 + ld combination left one
-    # CPU pinned at the end of every build); lto=off skips the
+    # codegen across CPUs (the previous cgu=1 + default ld combination
+    # left one CPU pinned at the end of every build); lto=off skips the
     # cross-crate optimization pass that's the next-biggest single-thread
     # tail. Trade is ~10–15% runtime CPU perf on hot paths — negligible
     # for an I/O-bound HTTP server (qdrant + LLM + embeddings dominate
     # any extraction workload). Switch back to lto="thin" / cgu=1 here
     # before a release benchmark if pure-CPU perf is being measured.
+    #
+    # Mold linker was tried (-C link-arg=-fuse-ld=mold) and dropped: the
+    # nixpkgs cc-wrapper's RPATH injection didn't survive the mold link
+    # path, producing a binary with empty DT_RPATH that failed at startup
+    # with "libssl.so.3: cannot open shared object file". Default ld
+    # remains until that's investigated separately.
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "16";
     CARGO_PROFILE_RELEASE_LTO = "off";
 
