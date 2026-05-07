@@ -212,13 +212,87 @@ async fn call_tool(client: &Client, cfg: &Config, name: &str, args: &Value) -> R
         other => anyhow::bail!("unknown tool: {other}"),
     };
 
+    let pretty = serde_json::to_string_pretty(&resp_value)
+        .unwrap_or_else(|_| resp_value.to_string());
+    let body = if name == "recall" {
+        let preamble = build_recall_preamble(&resp_value);
+        if preamble.is_empty() {
+            pretty
+        } else {
+            format!("{preamble}\n\n{pretty}")
+        }
+    } else {
+        pretty
+    };
+
     Ok(json!({
-        "content": [{
-            "type": "text",
-            "text": serde_json::to_string_pretty(&resp_value).unwrap_or_else(|_| resp_value.to_string())
-        }],
+        "content": [{ "type": "text", "text": body }],
         "isError": false
     }))
+}
+
+/// Build a plaintext preamble that goes ABOVE the JSON dump in the
+/// recall tool response. This is the first thing the agent reads.
+///
+/// Why: the response payload pretty-prints to ~10 KB with 8 results,
+/// and the `absolutePath` field on each result ends up buried mid-
+/// blob. Empirical failure mode (2026-05-07): a small/quantized local
+/// model (Q3 27B on llama.cpp `--parallel 1`, when the Spark fallover
+/// path is active) confabulates a familiar-looking path from training
+/// data (`/Users/jk/testbed/...`) instead of using the field. The
+/// preamble surfaces the resolved paths up-front so the model can't
+/// miss them.
+///
+/// Format:
+///
+///   READABLE FILES (absolute paths — pass these verbatim to your read
+///   tool ONLY if the chunk excerpts are insufficient. Do NOT guess
+///   paths from `source` URIs or training data.):
+///     • /home/data01/Notes/<...>.md
+///     • ...
+///
+///   THE CHUNKS BELOW ARE THE ANSWER for most queries — read them
+///   first, only escalate to a file read if the user explicitly asked
+///   for the full document or the excerpts are clearly truncated mid-
+///   content the user needs.
+///
+/// Returns "" when the response has no `results[]` with `absolutePath`
+/// (e.g. all sources are external https/arxiv URIs, or the response
+/// is an error). The caller skips the preamble in that case.
+fn build_recall_preamble(resp: &Value) -> String {
+    let results = match resp.get("results").and_then(|v| v.as_array()) {
+        Some(rs) if !rs.is_empty() => rs,
+        _ => return String::new(),
+    };
+    let mut paths: Vec<&str> = Vec::new();
+    for r in results {
+        if let Some(p) = r.get("absolutePath").and_then(|v| v.as_str()) {
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+    }
+    if paths.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "READABLE FILES (absolute paths — pass these verbatim to your read tool \
+         ONLY if the chunk excerpts below are insufficient. Do NOT guess paths \
+         from `source` URIs or training data; do NOT prepend cwd to relative-\
+         looking strings.):\n",
+    );
+    for p in &paths {
+        out.push_str("  • ");
+        out.push_str(p);
+        out.push('\n');
+    }
+    out.push_str(
+        "\nTHE CHUNK EXCERPTS BELOW ARE THE ANSWER for most queries — read \
+         them first, only escalate to a file read if the user explicitly asked \
+         for the full document or the excerpts are clearly truncated mid-\
+         content the user needs.",
+    );
+    out
 }
 
 async fn handle(req: JsonRpcRequest, client: &Client, cfg: &Config) -> Option<JsonRpcResponse> {
