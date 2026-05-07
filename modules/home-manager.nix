@@ -788,7 +788,7 @@ in
           Whether to post the `llm.*` block to `/config` at startup.
           When false, graphrag-core uses its built-in struct defaults
           (initial=64, max=64, successThreshold=10, failureDecay=0.5,
-          shrinkCooldownMs=500). Disable only if you need to fully
+          shrinkCooldownMs=5000). Disable only if you need to fully
           drive concurrency from a hand-written `pipelineConfig`.
         '';
       };
@@ -856,14 +856,21 @@ in
 
       shrinkCooldownMs = lib.mkOption {
         type = lib.types.int;
-        default = 500;
+        default = 5000;
         description = ''
-          Minimum gap between consecutive shrinks. Without this,
-          a burst of N simultaneous in-flight requests all timing
-          out (e.g. when Spark drops mid-batch) would halve N times
-          and over-shrink. With a 500ms cooldown, only the first
-          shrinks; subsequent failures inside the window are
-          ignored. The next batch then probes from the lower cap.
+          Minimum gap between consecutive shrinks. Without this, a
+          burst of N simultaneous in-flight requests all timing out
+          (e.g. when Spark drops mid-batch) would halve N times and
+          over-shrink. The cooldown bounds it to ONE shrink per
+          discrete upstream event up to this duration.
+
+          Default 5000ms (5s, bumped from 500ms 2026-05-07): real
+          network blips / DNS retries / TCP reconnects often take
+          1-2s, longer than the old 500ms window which would still
+          let the cap collapse on a single blip. At llm.max=128 with
+          failureDecay=0.5, a 2s blip with 30 in-flight requests
+          could collapse 128 → 64 → 32 → 16 → 8 in ms; the longer
+          cooldown keeps it at 128 → 64.
         '';
       };
     };
