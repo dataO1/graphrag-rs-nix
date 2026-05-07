@@ -29,6 +29,8 @@ let
         max_tokens = cfg.chat.maxTokens;
       } // lib.optionalAttrs (cfg.chat.openai.extraBody != { }) {
         extra_body = cfg.chat.openai.extraBody;
+      } // lib.optionalAttrs cfg.chat.openai.guidedJson {
+        guided_json = true;
       };
     } else {
       ollama = {
@@ -560,6 +562,25 @@ in
 
             Existing fields set elsewhere (model, max_tokens, temperature,
             stop, top_p) take precedence over collisions.
+          '';
+        };
+
+        guidedJson = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = ''
+            Attach a JSON Schema `response_format` to entity-extraction
+            chat-completions requests so the upstream sampler is
+            constrained to emit conforming JSON. vLLM (xgrammar /
+            outlines), llama.cpp (recent), and real OpenAI all honor
+            `response_format = { type = "json_schema"; ... }`. With this
+            on, the entity extractor's free-form parse / repair pipeline
+            becomes a defense-in-depth fallback that should rarely fire.
+
+            Only the entity-extraction call site uses the schema; query
+            planning and completion checks continue to send free-form
+            requests. Default off so existing setups don't break on
+            backends that 400 on the extra field.
           '';
         };
       };
