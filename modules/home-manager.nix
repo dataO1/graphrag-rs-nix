@@ -85,11 +85,29 @@ let
     };
   };
 
+  # Recall-synthesis prompt budget. graphrag-core caps the SOURCE
+  # TEXT block at `max_input_chars - skeleton_reserve_chars` so a
+  # popular seed entity (mentioned in hundreds of chunks) doesn't
+  # balloon the prompt past the chat upstream's context. With
+  # max_input_chars=0 (default), graphrag-server probes the upstream
+  # at /config init for max_model_len (vLLM /v1/models) or n_ctx
+  # (llama.cpp /props) and resolves a concrete value before the
+  # config reaches graphrag-core.
+  synthesisPipelineConfig = lib.optionalAttrs cfg.synthesis.enable {
+    synthesis = {
+      max_input_chars = cfg.synthesis.maxInputChars;
+      max_chars_per_chunk = cfg.synthesis.maxCharsPerChunk;
+      skeleton_reserve_chars = cfg.synthesis.skeletonReserveChars;
+    };
+  };
+
   effectivePipelineConfig =
     let
       base = lib.recursiveUpdate
-        (lib.recursiveUpdate embeddingsPipelineConfig chatPipelineConfig)
-        llmPipelineConfig;
+        (lib.recursiveUpdate
+          (lib.recursiveUpdate embeddingsPipelineConfig chatPipelineConfig)
+          llmPipelineConfig)
+        synthesisPipelineConfig;
     in
     if cfg.pipelineConfig != null then
       lib.recursiveUpdate base cfg.pipelineConfig
@@ -784,6 +802,76 @@ in
           and over-shrink. With a 500ms cooldown, only the first
           shrinks; subsequent failures inside the window are
           ignored. The next batch then probes from the lower cap.
+        '';
+      };
+    };
+
+    synthesis = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Whether to post the `synthesis.*` block to `/config` at
+          startup. When false, graphrag-core uses its built-in struct
+          defaults (max_input_chars=0 → unbounded if the server-side
+          probe can't resolve, max_chars_per_chunk=2000,
+          skeleton_reserve_chars=8000). Disable only if you drive
+          synthesis from a hand-written `pipelineConfig`.
+        '';
+      };
+
+      maxInputChars = lib.mkOption {
+        type = lib.types.int;
+        default = 0;
+        example = 200000;
+        description = ''
+          Max INPUT prompt size (in chars) for the recall-synthesis
+          call (`ask_with_dual_seeds` / `ask_with_seed_entities`).
+          `0` (default) triggers graphrag-server's startup probe of
+          the chat upstream — `GET /v1/models[].max_model_len` (vLLM)
+          or `meta.n_ctx_train` (llama.cpp /v1/models) or `/props`
+          (llama.cpp) — and resolves the cap from the model's actual
+          context window with a 90% safety margin and the configured
+          `openai.max_tokens` reserved for output.
+
+          Set explicitly when:
+            • the upstream is real OpenAI / OpenRouter / a router that
+              doesn't expose `max_model_len` (probe falls back to
+              32 768 chars otherwise — conservative, may underuse
+              your model's context), OR
+            • you want a tighter cap than the model's max (saves cost,
+              cuts time-to-first-token, may drop chunks the LLM would
+              otherwise fold in).
+
+          Without this cap, a popular seed entity whose mention set
+          runs into the hundreds (e.g. "graphrag" mentioned in 200
+          chunks) blows up `chunks_block` to ~1 MB and trips vLLM's
+          max-context check with a 400.
+        '';
+      };
+
+      maxCharsPerChunk = lib.mkOption {
+        type = lib.types.int;
+        default = 2000;
+        description = ''
+          Per-chunk char cap inside the SOURCE TEXT block. Truncates
+          outliers so a single very long chunk doesn't consume the
+          whole budget at the expense of breadth. ~500 tokens per
+          chunk at a typical chat-model tokenizer; raise for
+          long-context models, lower for tighter contexts.
+        '';
+      };
+
+      skeletonReserveChars = lib.mkOption {
+        type = lib.types.int;
+        default = 8000;
+        description = ''
+          How many chars to reserve in `maxInputChars` for the prompt
+          SKELETON: the prompt template + ENTITIES + RELATIONSHIPS
+          blocks. The chunks_block budget actually used at synthesis
+          time is `maxInputChars - skeletonReserveChars`. Raise for
+          recalls that consistently expand to many entities/edges;
+          lower if you've shortened the synthesis prompt.
         '';
       };
     };
