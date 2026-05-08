@@ -155,7 +155,12 @@ let
         "            truncate: true,\n"
         f"            pooling: {EMBED_POOLING},\n"
         f"            target_device: \"{EMBED_DEVICE}\",\n"
-        "            plugin_config: '{\"NUM_STREAMS\":\"1\"}',\n"
+        # CACHE_DIR persists OpenVINO JIT-compiled kernels across
+        # OVMS restarts. First-ever start still pays the compile
+        # cost; every subsequent start (rebuild, OOM, reboot)
+        # restores from cache in ~ms instead of seconds-to-minutes.
+        # Per-graph subdir avoids cross-model cache poisoning.
+        "            plugin_config: '{\"NUM_STREAMS\":\"1\",\"CACHE_DIR\":\"/cache/embeddings\"}',\n"
         "        }\n"
         "    }\n"
         "}\n"
@@ -253,7 +258,10 @@ let
             "        [type.googleapis.com / mediapipe.RerankCalculatorOVOptions]: {\n"
             "            models_path: \"./\",\n"
             f"            target_device: \"{RERANK_DEVICE}\",\n"
-            f"            plugin_config: '{{\"NUM_STREAMS\":\"{RERANK_NUM_STREAMS}\"}}',\n"
+            # CACHE_DIR mirrors the embedder graph above — persists
+            # OpenVINO JIT kernels across OVMS restarts. Saves ~5–10 s
+            # of cold-start latency on every restart of the 4B model.
+            f"            plugin_config: '{{\"NUM_STREAMS\":\"{RERANK_NUM_STREAMS}\",\"CACHE_DIR\":\"/cache/{RERANK_NAME}\"}}',\n"
             "        }\n"
             "    }\n"
             "}\n"
@@ -605,6 +613,12 @@ in
     systemd.tmpfiles.rules = [
       "d ${cfg.stateDir} 0750 ${cfg.user} ${cfg.group} -"
       "Z ${cfg.stateDir}/ovms-models 0750 ${cfg.user} ${cfg.group} -"
+      # OpenVINO plugin compile cache. CACHE_DIR in plugin_config
+      # persists JIT-compiled kernels across OVMS restarts so we
+      # only pay the kernel-compile cost once per model+device. The
+      # OVMS container mounts this rw at /cache (the models dir
+      # stays ro for safety).
+      "d ${cfg.stateDir}/ovms-cache 0750 ${cfg.user} ${cfg.group} -"
     ];
 
     # NPU kernel driver.
@@ -640,6 +654,10 @@ in
       ports = [ "127.0.0.1:${toString cfg.ports.openvino}:8000" ];
       volumes = [
         "${cfg.stateDir}/ovms-models:/models:ro"
+        # rw mount for the OpenVINO plugin compile cache (CACHE_DIR
+        # in plugin_config). Persists JIT kernels across OVMS
+        # restarts.
+        "${cfg.stateDir}/ovms-cache:/cache:rw"
       ];
       cmd = [
         "--rest_port" "8000"
