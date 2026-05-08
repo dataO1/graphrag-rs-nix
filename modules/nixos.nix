@@ -199,27 +199,49 @@ let
         print("[rerank 4/5] Converting rerank tokenizer → OpenVINO tokenizer")
         rhf_tok = AutoTokenizer.from_pretrained(RERANK_MODEL, trust_remote_code=True)
         rhf_tok.model_max_length = RERANK_SEQ_LEN
-        for kwargs in [
-            dict(with_detokenizer=False, use_max_padding=True),
-            dict(with_detokenizer=False, max_length=RERANK_SEQ_LEN, use_max_padding=True),
-            dict(with_detokenizer=False, max_length=RERANK_SEQ_LEN, pad_to_max_length=True, truncation=True),
-            dict(with_detokenizer=False),
-        ]:
-            try:
-                rov_tok = convert_tokenizer(rhf_tok, **kwargs)
-                # convert_tokenizer returns either a single model or a tuple;
-                # normalize to single-model form for the rerank path
-                # (RerankCalculatorOV doesn't need a detokenizer).
-                if isinstance(rov_tok, tuple):
-                    rov_tok = rov_tok[0]
-                print(f"  rerank convert_tokenizer kwargs that worked: {sorted(kwargs)}")
-                break
-            except TypeError as e:
-                print(f"  rerank convert_tokenizer rejected {sorted(kwargs)}: {e}")
-                continue
-        else:
-            raise RuntimeError("no rerank convert_tokenizer parameter set succeeded")
+        # OVMS upstream `export_rerank_tokenizer` uses
+        # `convert_tokenizer(hf, add_special_tokens=False)` — but that
+        # produces a DYNAMIC-shape tokenizer, which works on CPU/GPU
+        # (model is also dynamic) but breaks on NPU where the model is
+        # statically reshaped to [1, RERANK_SEQ_LEN]. The NPU plugin
+        # rejects the mismatched tensor with:
+        #   Failed to set tensor. Check 'is_dynamic ||
+        #     port.get_shape() == tensor->get_shape()' failed
+        # Fix: force fixed-length padding via `max_length=RERANK_SEQ_LEN`
+        # + `use_max_padding=True`. Combined with `add_special_tokens=False`
+        # (matching upstream so the calculator's special-token insertion
+        # still works) this yields a tokenizer that always emits
+        # [1, RERANK_SEQ_LEN] regardless of input length. Confirmed on
+        # `tomaarsen/Qwen3-Reranker-0.6B-seq-cls` (Qwen3 BPE tokenizer).
+        rov_tok = convert_tokenizer(
+            rhf_tok,
+            with_detokenizer=False,
+            add_special_tokens=False,
+            max_length=RERANK_SEQ_LEN,
+            use_max_padding=True,
+        )
+        if isinstance(rov_tok, tuple):
+            rov_tok = rov_tok[0]
         ov.save_model(rov_tok, str(RR / "openvino_tokenizer.xml"))
+
+        # Belt-and-braces: read the saved tokenizer back and verify its
+        # outputs are fixed at [1, RERANK_SEQ_LEN]. Fail loudly at build
+        # time rather than at first-rerank-request runtime.
+        verify_tok = core.read_model(str(RR / "openvino_tokenizer.xml"))
+        for out in verify_tok.outputs:
+            shape = out.get_partial_shape()
+            print(f"  rerank tokenizer output `{out.get_any_name()}`: shape={shape}")
+            # Expect a fully-static rank-2 shape; the second dim must be
+            # RERANK_SEQ_LEN. Some tokenizers emit a 1-D `eos_token_id`
+            # output that we skip.
+            if len(shape) == 2:
+                if shape[1].is_dynamic or shape[1].get_length() != RERANK_SEQ_LEN:
+                    raise RuntimeError(
+                        f"rerank tokenizer output `{out.get_any_name()}` is not fixed at "
+                        f"seq_len={RERANK_SEQ_LEN}: got shape={shape}. NPU will reject the "
+                        f"tensor at runtime. Fix: bump openvino_tokenizers, or change "
+                        f"reranker.device to GPU/CPU (which accept dynamic shapes)."
+                    )
 
         print(f"[rerank 5/5] Writing graph.pbtxt (RerankCalculatorOV, target_device={RERANK_DEVICE})")
         # RerankCalculatorOV is the simple single-calculator form (mirrors
