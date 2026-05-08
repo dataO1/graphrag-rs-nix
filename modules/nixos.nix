@@ -341,14 +341,22 @@ let
 
       # Artifacts on disk were just rebuilt. If OVMS is already running
       # from a previous deploy, it's still holding the OLD artifacts in
-      # memory — restart it so the new model graphs are picked up.
+      # memory — kick it so the new model graphs are picked up.
       # Best-effort: a fresh boot won't have OVMS running yet, in which
       # case `is-active` returns false and we skip silently. The
       # `wantedBy` / `before` ordering on the unit handles the cold-
       # start case independently.
+      #
+      # CRITICAL: must use `--no-block` here. Without it, `systemctl
+      # restart` blocks waiting for the OVMS unit to reach active. But
+      # the OVMS unit has `before=graphrag-ovms-pull` ordering — its
+      # restart job is queued behind THIS pull job's completion. So
+      # blocking creates a deadlock: pull waits for OVMS active, OVMS
+      # waits for pull to finish. Hit this in production 2026-05-08;
+      # fix is to enqueue the restart and let our own ExecStart return.
       if ${pkgs.systemd}/bin/systemctl is-active --quiet podman-graphrag-ovms.service; then
-        echo "[graphrag-ovms-pull] Restarting OVMS to pick up rebuilt artifacts..."
-        ${pkgs.systemd}/bin/systemctl restart podman-graphrag-ovms.service || true
+        echo "[graphrag-ovms-pull] Enqueueing OVMS restart (no-block) so the new artifacts get picked up..."
+        ${pkgs.systemd}/bin/systemctl --no-block restart podman-graphrag-ovms.service || true
       fi
 
       echo "[graphrag-ovms-pull] Done."
