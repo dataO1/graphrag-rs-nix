@@ -105,13 +105,31 @@ let
     };
   };
 
+  # Phase H: optional cross-encoder reranker. When enabled, graphrag-server
+  # POSTs the candidate excerpts after vector search to a
+  # Cohere/vLLM-compatible /rerank endpoint and reorders by the upstream's
+  # relevance scores. Disabled by default — turn on after standing up a
+  # reranker model (e.g. BAAI/bge-reranker-base on Spark).
+  rerankerPipelineConfig = lib.optionalAttrs cfg.reranker.enable {
+    reranker = {
+      enabled = true;
+      endpoint = cfg.reranker.endpoint;
+      model = cfg.reranker.model;
+      api_key = cfg.reranker.apiKey;
+      top_n = cfg.reranker.topN;
+      timeout_seconds = cfg.reranker.timeoutSeconds;
+    };
+  };
+
   effectivePipelineConfig =
     let
       base = lib.recursiveUpdate
         (lib.recursiveUpdate
-          (lib.recursiveUpdate embeddingsPipelineConfig chatPipelineConfig)
-          llmPipelineConfig)
-        synthesisPipelineConfig;
+          (lib.recursiveUpdate
+            (lib.recursiveUpdate embeddingsPipelineConfig chatPipelineConfig)
+            llmPipelineConfig)
+          synthesisPipelineConfig)
+        rerankerPipelineConfig;
     in
     if cfg.pipelineConfig != null then
       lib.recursiveUpdate base cfg.pipelineConfig
@@ -941,6 +959,85 @@ in
           time is `maxInputChars - skeletonReserveChars`. Raise for
           recalls that consistently expand to many entities/edges;
           lower if you've shortened the synthesis prompt.
+        '';
+      };
+    };
+
+    reranker = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Phase H: cross-encoder reranking after vector search. When
+          enabled, every `/api/query` recall POSTs the candidate
+          excerpts to a Cohere/vLLM-compatible `/rerank` endpoint and
+          reorders by the upstream's relevance scores before the
+          synthesis prompt and the response. Buys +10–20% nDCG at
+          ~50 ms/query.
+
+          Default `false` — turn on after standing up a reranker model
+          (e.g. `BAAI/bge-reranker-base` on Spark's vLLM, or
+          `BAAI/bge-reranker-v2-m3` for stronger results at higher
+          cost). Keep off if no reranker is reachable: a misconfigured
+          reranker silently falls back to the original vector ordering
+          (logged at WARN), so the cost of leaving it enabled with a
+          dead upstream is just the connect timeout per query.
+        '';
+      };
+
+      endpoint = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        example = "http://127.0.0.1:17172/v1";
+        description = ''
+          Base URL of the rerank service. The runtime path appends
+          `/rerank` and POSTs `{ model, query, documents, top_n }`.
+          Cohere-style + vLLM-style + Voyage-style upstreams all
+          parse cleanly.
+        '';
+      };
+
+      model = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        example = "BAAI/bge-reranker-base";
+        description = ''
+          Model id sent in the rerank request body. Whatever the
+          upstream is configured to serve.
+        '';
+      };
+
+      apiKey = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = ''
+          Bearer token for the reranker upstream. Empty ⇒ no auth
+          header attached. Local vLLM / OVMS deployments typically
+          run unauthenticated.
+        '';
+      };
+
+      topN = lib.mkOption {
+        type = lib.types.int;
+        default = 10;
+        example = 8;
+        description = ''
+          Cap on candidates kept after rerank. The upstream sees the
+          full vector-search top-K (so it can score relative to the
+          full set) but only the top `topN` survive into the answer
+          prompt and the response. `0` ⇒ no truncation (keep the
+          upstream's full reordered list).
+        '';
+      };
+
+      timeoutSeconds = lib.mkOption {
+        type = lib.types.int;
+        default = 30;
+        description = ''
+          Per-request timeout. Matches the chat-client pattern; keeps
+          a slow reranker upstream from holding a recall permit
+          forever. On timeout, the original vector ordering is kept
+          (logged at WARN) and the recall completes normally.
         '';
       };
     };
