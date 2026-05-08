@@ -35,32 +35,55 @@ let
   #   4. Hand-write Mediapipe graph.pbtxt (EmbeddingsCalculatorOV)
   #   5. Hand-write models/config.json referencing the graph
   pullPyScript = pkgs.writeText "graphrag-ovms-pull.py" ''
-    """Build a static-shape OVMS embeddings model. See nixos.nix header for context."""
+    """Build static-shape OVMS embedding (+ optional rerank) models.
+
+    Pipeline mirrors the OVMS upstream `export_model.py {embeddings_ov,rerank_ov}`
+    flows but stays in this single script so we don't pull in the OVMS demo
+    repo. Both halves write into the same /models tree and produce one
+    `config.json` whose `mediapipe_config_list` lists every graph.
+
+    See nixos.nix header for context.
+    """
     import json
     import os
     import shutil
     import subprocess
     from pathlib import Path
 
-    MODEL = os.environ["GRS_MODEL"]
-    SEQ_LEN = int(os.environ["GRS_SEQ_LEN"])
-    POOLING = os.environ["GRS_POOLING"]
-    DEVICE = os.environ["GRS_DEVICE"]
+    EMBED_MODEL = os.environ["GRS_MODEL"]
+    EMBED_SEQ_LEN = int(os.environ["GRS_SEQ_LEN"])
+    EMBED_POOLING = os.environ["GRS_POOLING"]
+    EMBED_DEVICE = os.environ["GRS_DEVICE"]
+
+    # Reranker is optional. When `GRS_RERANKER_MODEL` is empty the rerank
+    # branch is skipped entirely and the resulting config has only the
+    # embeddings graph (back-compat with deployments that haven't opted in).
+    RERANK_MODEL = os.environ.get("GRS_RERANKER_MODEL", "")
+    RERANK_SEQ_LEN = int(os.environ.get("GRS_RERANKER_SEQ_LEN", "512"))
+    RERANK_DEVICE = os.environ.get("GRS_RERANKER_DEVICE", "CPU")
+    RERANK_NUM_STREAMS = os.environ.get("GRS_RERANKER_NUM_STREAMS", "1")
+    RERANK_NAME = os.environ.get("GRS_RERANKER_NAME", "reranker")
 
     MODELS = Path("/models")
     STAGING = MODELS / ".staging"
     EMB = MODELS / "embeddings"
+    RR = MODELS / "rerank"
 
     if STAGING.exists():
         shutil.rmtree(STAGING)
     if EMB.exists():
         shutil.rmtree(EMB)
     EMB.mkdir(parents=True)
+    if RERANK_MODEL:
+        if RR.exists():
+            shutil.rmtree(RR)
+        RR.mkdir(parents=True)
 
-    print(f"[1/6] Exporting {MODEL} via optimum-cli (INT8) → {STAGING}")
+    # ────────────────────────── EMBEDDING ──────────────────────────
+    print(f"[embed 1/6] Exporting {EMBED_MODEL} via optimum-cli (INT8) → {STAGING}")
     subprocess.check_call([
         "optimum-cli", "export", "openvino",
-        "--model", MODEL,
+        "--model", EMBED_MODEL,
         "--task", "feature-extraction",
         "--weight-format", "int8",
         "--library", "transformers",
@@ -70,26 +93,26 @@ let
 
     import openvino as ov
     core = ov.Core()
-    print(f"[2/6] Reading IR + reshaping inputs to [1, {SEQ_LEN}]")
+    print(f"[embed 2/6] Reading IR + reshaping inputs to [1, {EMBED_SEQ_LEN}]")
     model = core.read_model(str(STAGING / "openvino_model.xml"))
-    model.reshape({p.get_any_name(): [1, SEQ_LEN] for p in model.inputs})
+    model.reshape({p.get_any_name(): [1, EMBED_SEQ_LEN] for p in model.inputs})
 
-    print(f"[3/6] Saving static IR → {EMB}/openvino_model.xml")
+    print(f"[embed 3/6] Saving static IR → {EMB}/openvino_model.xml")
     ov.save_model(model, str(EMB / "openvino_model.xml"), compress_to_fp16=False)
 
-    print("[4/6] Converting HF tokenizer → OpenVINO tokenizer + detokenizer")
+    print("[embed 4/6] Converting HF tokenizer → OpenVINO tokenizer + detokenizer")
     from openvino_tokenizers import convert_tokenizer
     from transformers import AutoTokenizer
-    hf_tok = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
+    hf_tok = AutoTokenizer.from_pretrained(EMBED_MODEL, trust_remote_code=True)
     # Force max_length so the converted OV tokenizer pads to that shape. NPU 3
     # needs every input tensor at compile-time-known shapes; without this,
     # short inputs become e.g. [1, 7] and the EmbeddingsCalculatorOV's
     # RET_CHECK fails when feeding the static [1, SEQ_LEN] model.
-    hf_tok.model_max_length = SEQ_LEN
+    hf_tok.model_max_length = EMBED_SEQ_LEN
     for kwargs in [
         dict(with_detokenizer=True, use_max_padding=True),
-        dict(with_detokenizer=True, max_length=SEQ_LEN, use_max_padding=True),
-        dict(with_detokenizer=True, max_length=SEQ_LEN, pad_to_max_length=True, truncation=True),
+        dict(with_detokenizer=True, max_length=EMBED_SEQ_LEN, use_max_padding=True),
+        dict(with_detokenizer=True, max_length=EMBED_SEQ_LEN, pad_to_max_length=True, truncation=True),
         dict(with_detokenizer=True),
     ]:
         try:
@@ -104,14 +127,14 @@ let
     ov.save_model(ov_tok,   str(EMB / "openvino_tokenizer.xml"))
     ov.save_model(ov_detok, str(EMB / "openvino_detokenizer.xml"))
 
-    print(f"[5/6] Writing graph.pbtxt (EmbeddingsCalculatorOV, target_device={DEVICE}, pooling={POOLING})")
+    print(f"[embed 5/6] Writing graph.pbtxt (EmbeddingsCalculatorOV, target_device={EMBED_DEVICE}, pooling={EMBED_POOLING})")
     graph_pbtxt = (
         "# Generated by graphrag-rs-npu (nixos module)\n"
-        f"# model={MODEL} seq_len={SEQ_LEN} pooling={POOLING} device={DEVICE}\n"
+        f"# model={EMBED_MODEL} seq_len={EMBED_SEQ_LEN} pooling={EMBED_POOLING} device={EMBED_DEVICE}\n"
         "input_stream: \"REQUEST_PAYLOAD:input\"\n"
         "output_stream: \"RESPONSE_PAYLOAD:output\"\n"
         "node {\n"
-        f"    name: \"{MODEL}\",\n"
+        f"    name: \"{EMBED_MODEL}\",\n"
         "    calculator: \"EmbeddingsCalculatorOV\"\n"
         "    input_side_packet: \"EMBEDDINGS_NODE_RESOURCES:embeddings_servable\"\n"
         "    input_stream: \"REQUEST_PAYLOAD:input\"\n"
@@ -123,30 +146,130 @@ let
         # truncate=true clips/pads inputs to the model's static seq_len.
         # Required for NPU 3 (baked-static shapes); harmless on dynamic IRs.
         "            truncate: true,\n"
-        f"            pooling: {POOLING},\n"
-        f"            target_device: \"{DEVICE}\",\n"
+        f"            pooling: {EMBED_POOLING},\n"
+        f"            target_device: \"{EMBED_DEVICE}\",\n"
         "            plugin_config: '{\"NUM_STREAMS\":\"1\"}',\n"
         "        }\n"
         "    }\n"
         "}\n"
     )
     (EMB / "graph.pbtxt").write_text(graph_pbtxt)
+    print("[embed 6/6] Embeddings artifacts ready.")
+    shutil.rmtree(STAGING, ignore_errors=True)
 
-    print("[6/6] Writing /models/config.json")
+    # ────────────────────────── RERANKER ──────────────────────────
+    mediapipe_entries = [
+        {"name": "embeddings", "graph_path": "/models/embeddings/graph.pbtxt"}
+    ]
+
+    if RERANK_MODEL:
+        print(f"[rerank 1/5] Exporting {RERANK_MODEL} via optimum-cli (INT8, text-classification) → {STAGING}")
+        if STAGING.exists():
+            shutil.rmtree(STAGING)
+        # `text-classification` is the OVMS-canonical task for cross-encoders;
+        # for Qwen3-Reranker-0.6B the seq-cls community variant
+        # (`tomaarsen/Qwen3-Reranker-0.6B-seq-cls`) maps cleanly to this task.
+        # The official `Qwen/Qwen3-Reranker-0.6B` is a CausalLM that scores
+        # via "yes"/"no" token logits and would need a different pipeline
+        # (OpenVINO GenAI's TextRerankPipeline) — outside the OVMS path.
+        subprocess.check_call([
+            "optimum-cli", "export", "openvino",
+            "--model", RERANK_MODEL,
+            "--task", "text-classification",
+            "--weight-format", "int8",
+            "--library", "transformers",
+            "--trust-remote-code",
+            str(STAGING),
+        ])
+
+        print(f"[rerank 2/5] Reshaping rerank IR to [1, {RERANK_SEQ_LEN}]")
+        rmodel = core.read_model(str(STAGING / "openvino_model.xml"))
+        rmodel.reshape({p.get_any_name(): [1, RERANK_SEQ_LEN] for p in rmodel.inputs})
+
+        print(f"[rerank 3/5] Saving static rerank IR → {RR}/openvino_model.xml")
+        ov.save_model(rmodel, str(RR / "openvino_model.xml"), compress_to_fp16=False)
+
+        print("[rerank 4/5] Converting rerank tokenizer → OpenVINO tokenizer")
+        rhf_tok = AutoTokenizer.from_pretrained(RERANK_MODEL, trust_remote_code=True)
+        rhf_tok.model_max_length = RERANK_SEQ_LEN
+        for kwargs in [
+            dict(with_detokenizer=False, use_max_padding=True),
+            dict(with_detokenizer=False, max_length=RERANK_SEQ_LEN, use_max_padding=True),
+            dict(with_detokenizer=False, max_length=RERANK_SEQ_LEN, pad_to_max_length=True, truncation=True),
+            dict(with_detokenizer=False),
+        ]:
+            try:
+                rov_tok = convert_tokenizer(rhf_tok, **kwargs)
+                # convert_tokenizer returns either a single model or a tuple;
+                # normalize to single-model form for the rerank path
+                # (RerankCalculatorOV doesn't need a detokenizer).
+                if isinstance(rov_tok, tuple):
+                    rov_tok = rov_tok[0]
+                print(f"  rerank convert_tokenizer kwargs that worked: {sorted(kwargs)}")
+                break
+            except TypeError as e:
+                print(f"  rerank convert_tokenizer rejected {sorted(kwargs)}: {e}")
+                continue
+        else:
+            raise RuntimeError("no rerank convert_tokenizer parameter set succeeded")
+        ov.save_model(rov_tok, str(RR / "openvino_tokenizer.xml"))
+
+        print(f"[rerank 5/5] Writing graph.pbtxt (RerankCalculatorOV, target_device={RERANK_DEVICE})")
+        # RerankCalculatorOV is the simple single-calculator form (mirrors
+        # EmbeddingsCalculatorOV's shape). The OVMS export script also
+        # offers a two-servable form (`RerankCalculator`) where tokenizer
+        # and rerank are separate `OpenVINOModelServerSessionCalculator`s
+        # behind a `subconfig.json`. We use the single-calculator form
+        # for parity with our embedder graph.
+        rgraph_pbtxt = (
+            "# Generated by graphrag-rs-npu (nixos module)\n"
+            f"# model={RERANK_MODEL} seq_len={RERANK_SEQ_LEN} device={RERANK_DEVICE} num_streams={RERANK_NUM_STREAMS}\n"
+            "input_stream: \"REQUEST_PAYLOAD:input\"\n"
+            "output_stream: \"RESPONSE_PAYLOAD:output\"\n"
+            "node {\n"
+            f"    name: \"{RERANK_MODEL}\",\n"
+            "    calculator: \"RerankCalculatorOV\"\n"
+            "    input_side_packet: \"RERANK_NODE_RESOURCES:rerank_servable\"\n"
+            "    input_stream: \"REQUEST_PAYLOAD:input\"\n"
+            "    output_stream: \"RESPONSE_PAYLOAD:output\"\n"
+            "    node_options: {\n"
+            "        [type.googleapis.com / mediapipe.RerankCalculatorOVOptions]: {\n"
+            "            models_path: \"./\",\n"
+            f"            target_device: \"{RERANK_DEVICE}\",\n"
+            f"            plugin_config: '{{\"NUM_STREAMS\":\"{RERANK_NUM_STREAMS}\"}}',\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        (RR / "graph.pbtxt").write_text(rgraph_pbtxt)
+
+        mediapipe_entries.append(
+            {"name": RERANK_NAME, "graph_path": "/models/rerank/graph.pbtxt"}
+        )
+        shutil.rmtree(STAGING, ignore_errors=True)
+
+    # ────────────────────────── CONFIG ─────────────────────────────
+    print(f"[config] Writing /models/config.json with {len(mediapipe_entries)} graph(s)")
     config = {
         "model_config_list": [],
-        "mediapipe_config_list": [
-            {"name": "embeddings", "graph_path": "/models/embeddings/graph.pbtxt"}
-        ],
+        "mediapipe_config_list": mediapipe_entries,
     }
     (MODELS / "config.json").write_text(json.dumps(config, indent=2))
 
-    shutil.rmtree(STAGING, ignore_errors=True)
     print("Done.")
   '';
 
   # Idempotent wrapper around the export container. The stamp file encodes
-  # (model, seq_len, pooling, device); rebuild kicks in only when one changes.
+  # (embed model + seq + pool + device, plus reranker model + seq + device
+  # if enabled). Rebuild kicks in whenever any tracked field changes — so
+  # toggling the reranker on, swapping its model, or moving it CPU↔NPU all
+  # trigger a rebuild and OVMS restart on the next deploy.
+  rerankerStampPart =
+    if cfg.reranker.enable then
+      " r_model=${cfg.reranker.model} r_seq=${toString cfg.reranker.maxSeqLen} r_dev=${cfg.reranker.device} r_streams=${toString cfg.reranker.numStreams}"
+    else
+      " r=disabled";
+
   pullScript = pkgs.writeShellApplication {
     name = "graphrag-ovms-pull";
     runtimeInputs = [ pkgs.podman pkgs.coreutils ];
@@ -154,12 +277,25 @@ let
       set -euo pipefail
       MODELS_DIR="${cfg.stateDir}/ovms-models"
       STAMP_FILE="$MODELS_DIR/.graphrag-stamp"
-      STAMP="model=${cfg.embeddingModel} seq=${toString cfg.embeddingMaxSeqLen} pool=${cfg.embeddingPooling} dev=${cfg.embeddingDevice}"
+      STAMP="model=${cfg.embeddingModel} seq=${toString cfg.embeddingMaxSeqLen} pool=${cfg.embeddingPooling} dev=${cfg.embeddingDevice}${rerankerStampPart}"
 
       mkdir -p "$MODELS_DIR"
 
-      if [ -f "$MODELS_DIR/config.json" ] \
-         && [ -f "$MODELS_DIR/embeddings/openvino_model.xml" ] \
+      # All artifacts present + stamp unchanged ⇒ skip rebuild. The
+      # reranker artifact check is conditional on whether the reranker is
+      # enabled in this build's config.
+      ARTIFACTS_OK=0
+      if [ -f "$MODELS_DIR/config.json" ] && [ -f "$MODELS_DIR/embeddings/openvino_model.xml" ]; then
+        ${if cfg.reranker.enable then ''
+        if [ -f "$MODELS_DIR/rerank/openvino_model.xml" ]; then
+          ARTIFACTS_OK=1
+        fi
+        '' else ''
+        ARTIFACTS_OK=1
+        ''}
+      fi
+
+      if [ "$ARTIFACTS_OK" = "1" ] \
          && [ -f "$STAMP_FILE" ] \
          && [ "$(cat "$STAMP_FILE")" = "$STAMP" ]; then
         echo "[graphrag-ovms-pull] config matches stamp, skipping rebuild."
@@ -167,7 +303,7 @@ let
         exit 0
       fi
 
-      echo "[graphrag-ovms-pull] Building embedding model:"
+      echo "[graphrag-ovms-pull] Building OVMS models:"
       echo "  $STAMP"
 
       ${pkgs.podman}/bin/podman run --rm \
@@ -179,6 +315,11 @@ let
         -e GRS_SEQ_LEN="${toString cfg.embeddingMaxSeqLen}" \
         -e GRS_POOLING="${cfg.embeddingPooling}" \
         -e GRS_DEVICE="${cfg.embeddingDevice}" \
+        -e GRS_RERANKER_MODEL="${if cfg.reranker.enable then cfg.reranker.model else ""}" \
+        -e GRS_RERANKER_SEQ_LEN="${toString cfg.reranker.maxSeqLen}" \
+        -e GRS_RERANKER_DEVICE="${cfg.reranker.device}" \
+        -e GRS_RERANKER_NUM_STREAMS="${toString cfg.reranker.numStreams}" \
+        -e GRS_RERANKER_NAME="${cfg.reranker.name}" \
         -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
         ${pythonImage} \
         bash -c '
@@ -190,6 +331,19 @@ let
         '
 
       echo "$STAMP" > "$STAMP_FILE"
+
+      # Artifacts on disk were just rebuilt. If OVMS is already running
+      # from a previous deploy, it's still holding the OLD artifacts in
+      # memory — restart it so the new model graphs are picked up.
+      # Best-effort: a fresh boot won't have OVMS running yet, in which
+      # case `is-active` returns false and we skip silently. The
+      # `wantedBy` / `before` ordering on the unit handles the cold-
+      # start case independently.
+      if ${pkgs.systemd}/bin/systemctl is-active --quiet podman-graphrag-ovms.service; then
+        echo "[graphrag-ovms-pull] Restarting OVMS to pick up rebuilt artifacts..."
+        ${pkgs.systemd}/bin/systemctl restart podman-graphrag-ovms.service || true
+      fi
+
       echo "[graphrag-ovms-pull] Done."
     '';
   };
@@ -270,6 +424,102 @@ in
         load on NPU (NPU 3 requires fully-static shapes; some models can't
         be reshaped successfully).
       '';
+    };
+
+    reranker = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Build a second Mediapipe graph in the same OVMS instance that
+          serves a cross-encoder reranker on `/v3/rerank`. Disabled by
+          default — opt-in once the chosen reranker model is verified
+          to compile on the target device. When enabled, the same
+          `graphrag-ovms-pull` oneshot exports both models and the
+          OVMS process picks them both up via `mediapipe_config_list`.
+
+          See `GraphRAG-rs Reranker Model Selection.md` in the vault for
+          the picking-the-model exercise. The default model is the OVMS-
+          friendly seq-cls variant of Qwen3-Reranker-0.6B.
+        '';
+      };
+
+      model = lib.mkOption {
+        type = lib.types.str;
+        default = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls";
+        description = ''
+          HuggingFace repo of the reranker model. Must support
+          `optimum-cli export openvino --task text-classification` —
+          i.e. a sequence-classification head over an
+          encoder/cross-encoder backbone, OR a community-converted
+          seq-cls variant of a decoder-style reranker.
+
+          Tested values:
+            - `tomaarsen/Qwen3-Reranker-0.6B-seq-cls` (default; Qwen3-0.6B
+              with cls head; 596 M params; INT8 ≈ 600 MB; multilingual
+              incl. DE; same family as the embedder).
+            - `BAAI/bge-reranker-v2-m3` (XLM-RoBERTa cross-encoder; 568 M
+              params; INT8 ≈ 570 MB; OVMS rerank-demo reference).
+
+          AVOID: the official `Qwen/Qwen3-Reranker-0.6B` (CausalLM that
+          scores via "yes"/"no" token logits — needs OpenVINO GenAI's
+          `TextRerankPipeline`, NOT OVMS' `RerankCalculatorOV`).
+        '';
+      };
+
+      maxSeqLen = lib.mkOption {
+        type = lib.types.int;
+        default = 512;
+        description = ''
+          Static seq_len baked into the rerank IR. Cross-encoders see
+          `[CLS] query [SEP] document` packed into one sequence, so this
+          must accommodate query+doc tokens in one tensor. 512 fits the
+          typical RAG case (short query + ~500-token chunk excerpt);
+          raise to 1024 if you commonly send long-form chunks.
+        '';
+      };
+
+      device = lib.mkOption {
+        type = lib.types.enum [ "CPU" "GPU" "NPU" "AUTO" ];
+        default = "NPU";
+        description = ''
+          OpenVINO target device for the rerank model. Defaults to NPU
+          but **upstream OVMS does NOT have an NPU validation matrix
+          for rerank** — only CPU and GPU are documented. The NPU path
+          is "syntactically accepted, untested" per the OVMS rerank
+          demo. If the build or compile fails, fall back to "GPU"
+          (Intel iGPU): more memory, more compute, currently idle.
+
+          Concurrency interaction: when both embeddings and rerank
+          target NPU, the device multiplexes them. Embedding throughput
+          may degrade by up to 50% under simultaneous load — fine for
+          RAG where rerank is bursty (one batch per recall) and
+          embedding is hot path.
+        '';
+      };
+
+      numStreams = lib.mkOption {
+        type = lib.types.int;
+        default = 1;
+        description = ''
+          Per-model OpenVINO `NUM_STREAMS` (parallel execution streams
+          inside the rerank model). NPU's optimal is 1; raise to 2-4
+          on CPU/GPU to overlap independent batches. The OVMS upstream
+          script defaults to 1 too.
+        '';
+      };
+
+      name = lib.mkOption {
+        type = lib.types.str;
+        default = "reranker";
+        description = ''
+          Mediapipe graph name = the `model` field clients send in the
+          `/v3/rerank` request body. Matches what graphrag-server's
+          `services.graphrag-rs.reranker.model` posts. Keep "reranker"
+          unless you have a specific reason to rename — it's referenced
+          in stamp metadata and not auto-discovered.
+        '';
+      };
     };
 
     ports = {
