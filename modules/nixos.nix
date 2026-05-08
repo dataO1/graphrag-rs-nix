@@ -25,7 +25,81 @@ let
 
   # NPU support requires the -gpu image variant; the plain image is CPU-only.
   ovmsImage = "openvino/model_server:2026.0-gpu";
-  pythonImage = "python:3.12-slim";
+
+  # Host Python env for the pull script. Three of the heavy deps
+  # (openvino, optimum, transformers) ship in nixpkgs and come pre-built
+  # from cache.nixos.org — no PyPI roundtrip, no pip resolver. The two
+  # missing ones (openvino-tokenizers, nncf) come from a tiny
+  # fixed-output `pip install --no-deps` further down. Result: pull runs
+  # natively on the host (no podman, no `python:3.12-slim` cold-pip),
+  # using the binary cache for everything heavy.
+  pullPyEnv = pkgs.python3.withPackages (p: with p; [
+    openvino
+    optimum
+    transformers
+    pip      # only used by the `pullPyExtras` derivation below
+  ]);
+
+  # The two pip-only deps. Tiny (a few MB each) because we use
+  # `--no-deps` — their transitive closure (torch, openvino, etc.) is
+  # already provided by `pullPyEnv` from nixpkgs. Pinned loosely to
+  # nixpkgs' openvino major to avoid ABI drift between the two.
+  #
+  # Fixed-output derivation: nix allows network access for these only
+  # because we promise the result hash matches `outputHash`. First
+  # build fails with the real hash; copy it into outputHash, rebuild,
+  # locked. Re-run any time the version constraints below change.
+  pullPyExtras = pkgs.runCommand "graphrag-ovms-pull-pip-extras" {
+    nativeBuildInputs = [ pullPyEnv pkgs.cacert ];
+    SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+    outputHashAlgo = "sha256";
+    outputHash = "sha256-0EirSnNqdqoSjhlVqkIwGQBvHOg5GhLmaPKl1hkm14M=";
+    outputHashMode = "recursive";
+  } ''
+    mkdir -p $out
+    # `--no-compile` skips .pyc bytecode generation. Without it, pip
+    # bakes build timestamps into bytecode → non-deterministic output
+    # → fixed-output hash drifts between builds. .pyc is regenerated
+    # at first import on the consumer side; no functional difference.
+    # Install with full deps (no --no-deps). Earlier iterations tried
+    # to be clever — install only the 2 missing packages, rely on
+    # nixpkgs for the transitive closure. That spiraled into a
+    # whack-a-mole exercise (rich, ml-dtypes, optimum-onnx, … all
+    # missing piecewise) and the nixpkgs openvino 2025.2 was too old
+    # for optimum-intel 1.27 anyway. Cleanest: pip resolves the full
+    # closure once. Output is larger (~few hundred MB) but
+    # deterministic, fully self-contained, no nixpkgs version clashes.
+    ${pullPyEnv}/bin/python3 -m pip install \
+      --target "$out" \
+      --no-cache-dir \
+      --no-compile \
+      --only-binary=:all: \
+      "optimum[openvino]" \
+      "optimum-intel" \
+      "optimum-onnx" \
+      "openvino-tokenizers" \
+      "nncf"
+
+    # FOD contract: zero references to other /nix/store paths.
+    #  - bin/ contains pip-generated wrappers like `nncf` whose shebangs
+    #    point at the build-time python (a /nix/store path). We don't
+    #    use any of those; delete the dir.
+    #  - .dist-info/RECORD lists install paths that may include the
+    #    target's full /nix/store/<hash> path. Replace those with
+    #    relative paths.
+    rm -rf "$out/bin" 2>/dev/null || true
+    find "$out" -name "RECORD" -type f -exec sed -i "s|$out/||g" {} + 2>/dev/null || true
+
+    # Scrub stamps. Most pip versions don't leave any, but cheap insurance.
+    find "$out" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+    find "$out" -exec touch -t 197001010000 {} + 2>/dev/null || true
+
+    # Sanity check: fail loudly if any /nix/store reference remains.
+    if grep -rln "/nix/store" "$out" 2>/dev/null | head -5; then
+      echo "ERROR: pullPyExtras still has /nix/store references ↑" >&2
+      exit 1
+    fi
+  '';
 
   # In-container Python that builds the static-shape OVMS model:
   #   1. optimum-cli export <MODEL> → staging (FP/INT8 IR, dynamic shapes)
@@ -55,6 +129,15 @@ let
     EMBED_POOLING = os.environ["GRS_POOLING"]
     EMBED_DEVICE = os.environ["GRS_DEVICE"]
 
+    # Host filesystem path where artifacts get written. Defaults to the
+    # in-OVMS-container path "/models" so the script still works if
+    # invoked from inside a container; for native runs we set this to
+    # the actual host dir (services.graphrag-rs-npu.stateDir/ovms-models).
+    # The values inside config.json's mediapipe_config_list intentionally
+    # stay as `/models/...` because those paths are read by OVMS from
+    # INSIDE the OVMS container, where the host dir is mounted to /models.
+    HOST_MODELS_ROOT = os.environ.get("GRS_MODELS_DIR", "/models")
+
     # Reranker is optional. When `GRS_RERANKER_MODEL` is empty the rerank
     # branch is skipped entirely and the resulting config has only the
     # embeddings graph (back-compat with deployments that haven't opted in).
@@ -64,7 +147,7 @@ let
     RERANK_NUM_STREAMS = os.environ.get("GRS_RERANKER_NUM_STREAMS", "1")
     RERANK_NAME = os.environ.get("GRS_RERANKER_NAME", "reranker")
 
-    MODELS = Path("/models")
+    MODELS = Path(HOST_MODELS_ROOT)
     STAGING = MODELS / ".staging"
     EMB = MODELS / "embeddings"
     # The rerank directory MUST be named the same as the mediapipe
@@ -297,19 +380,15 @@ let
 
   pullScript = pkgs.writeShellApplication {
     name = "graphrag-ovms-pull";
-    runtimeInputs = [ pkgs.podman pkgs.coreutils ];
+    runtimeInputs = [ pullPyEnv pkgs.coreutils ];
     text = ''
       set -euo pipefail
       MODELS_DIR="${cfg.stateDir}/ovms-models"
       STAMP_FILE="$MODELS_DIR/.graphrag-stamp"
-      # Stamp includes the pull script's nix store path. Any change to
-      # the script content (export task, reshape logic, tokenizer kwargs,
-      # etc.) → new store hash → invalidated stamp → rebuild. Without
-      # this, edits to pullPyScript that don't touch the cfg.* values
-      # silently kept stale artifacts on disk (hit this 2026-05-08 when
-      # a rerank tokenizer kwargs fix didn't apply because the cfg
-      # values hadn't changed).
-      STAMP="model=${cfg.embeddingModel} seq=${toString cfg.embeddingMaxSeqLen} pool=${cfg.embeddingPooling} dev=${cfg.embeddingDevice}${rerankerStampPart} script=${pullPyScript}"
+      # Stamp includes the pull script's nix store path AND the python
+      # env's path. Any change to either (script content, dep set, dep
+      # versions) → new store hash → invalidated stamp → rebuild.
+      STAMP="model=${cfg.embeddingModel} seq=${toString cfg.embeddingMaxSeqLen} pool=${cfg.embeddingPooling} dev=${cfg.embeddingDevice}${rerankerStampPart} script=${pullPyScript} env=${pullPyEnv} extras=${pullPyExtras}"
 
       mkdir -p "$MODELS_DIR"
 
@@ -338,29 +417,41 @@ let
       echo "[graphrag-ovms-pull] Building OVMS models:"
       echo "  $STAMP"
 
-      ${pkgs.podman}/bin/podman run --rm \
-        --user=0:0 \
-        --workdir /tmp \
-        -v "$MODELS_DIR":/models:rw \
-        -v ${pullPyScript}:/pull.py:ro \
-        -e GRS_MODEL="${cfg.embeddingModel}" \
-        -e GRS_SEQ_LEN="${toString cfg.embeddingMaxSeqLen}" \
-        -e GRS_POOLING="${cfg.embeddingPooling}" \
-        -e GRS_DEVICE="${cfg.embeddingDevice}" \
-        -e GRS_RERANKER_MODEL="${if cfg.reranker.enable then cfg.reranker.model else ""}" \
-        -e GRS_RERANKER_SEQ_LEN="${toString cfg.reranker.maxSeqLen}" \
-        -e GRS_RERANKER_DEVICE="${cfg.reranker.device}" \
-        -e GRS_RERANKER_NUM_STREAMS="${toString cfg.reranker.numStreams}" \
-        -e GRS_RERANKER_NAME="${cfg.reranker.name}" \
-        -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
-        ${pythonImage} \
-        bash -c '
-          set -e
-          echo "Installing optimum[openvino] + openvino-tokenizers..."
-          pip install --quiet --no-warn-script-location \
-            "optimum[openvino]>=1.20" "openvino-tokenizers" "transformers"
-          python3 /pull.py
-        '
+      # Run the pull script natively on the host using the nix-built
+      # Python env (openvino + optimum + transformers from nixpkgs;
+      # openvino-tokenizers + nncf from the fixed-output extras dir).
+      # No container — no `pip install` cold-start, no python:slim image
+      # pull, no glibc ABI mismatch worries.
+      #
+      # PYTHONPATH puts the extras dir first so pip-installed openvino-
+      # tokenizers shadows nothing (it's not in nixpkgs at all). The
+      # nix-built env's bundled site-packages is on the interpreter's
+      # built-in sys.path.
+      # Manylinux wheels (numpy, torch, openvino, …) link to system
+      # libs at canonical paths like /lib/x86_64-linux-gnu/libstdc++.so.6.
+      # On NixOS those libs live in /nix/store/<gcc>/lib/. Set
+      # LD_LIBRARY_PATH so the wheels' binary C-extensions resolve.
+      # `lib.makeLibraryPath` walks each derivation's lib/ output.
+      env \
+        GRS_MODELS_DIR="$MODELS_DIR" \
+        GRS_MODEL="${cfg.embeddingModel}" \
+        GRS_SEQ_LEN="${toString cfg.embeddingMaxSeqLen}" \
+        GRS_POOLING="${cfg.embeddingPooling}" \
+        GRS_DEVICE="${cfg.embeddingDevice}" \
+        GRS_RERANKER_MODEL="${if cfg.reranker.enable then cfg.reranker.model else ""}" \
+        GRS_RERANKER_SEQ_LEN="${toString cfg.reranker.maxSeqLen}" \
+        GRS_RERANKER_DEVICE="${cfg.reranker.device}" \
+        GRS_RERANKER_NUM_STREAMS="${toString cfg.reranker.numStreams}" \
+        GRS_RERANKER_NAME="${cfg.reranker.name}" \
+        PYTHONPATH=${pullPyExtras} \
+        LD_LIBRARY_PATH=${lib.makeLibraryPath [
+          pkgs.stdenv.cc.cc.lib
+          pkgs.zlib
+          pkgs.libffi
+          pkgs.openssl
+          pkgs.glib
+        ]} \
+        ${pullPyEnv}/bin/python3 ${pullPyScript}
 
       echo "$STAMP" > "$STAMP_FILE"
 
