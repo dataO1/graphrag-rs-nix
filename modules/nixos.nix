@@ -306,7 +306,14 @@ let
       set -euo pipefail
       MODELS_DIR="${cfg.stateDir}/ovms-models"
       STAMP_FILE="$MODELS_DIR/.graphrag-stamp"
-      STAMP="model=${cfg.embeddingModel} seq=${toString cfg.embeddingMaxSeqLen} pool=${cfg.embeddingPooling} dev=${cfg.embeddingDevice}${rerankerStampPart}"
+      # Stamp includes the pull script's nix store path. Any change to
+      # the script content (export task, reshape logic, tokenizer kwargs,
+      # etc.) → new store hash → invalidated stamp → rebuild. Without
+      # this, edits to pullPyScript that don't touch the cfg.* values
+      # silently kept stale artifacts on disk (hit this 2026-05-08 when
+      # a rerank tokenizer kwargs fix didn't apply because the cfg
+      # values hadn't changed).
+      STAMP="model=${cfg.embeddingModel} seq=${toString cfg.embeddingMaxSeqLen} pool=${cfg.embeddingPooling} dev=${cfg.embeddingDevice}${rerankerStampPart} script=${pullPyScript}"
 
       mkdir -p "$MODELS_DIR"
 
