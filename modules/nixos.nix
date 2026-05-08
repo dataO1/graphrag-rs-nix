@@ -222,26 +222,33 @@ let
         )
         if isinstance(rov_tok, tuple):
             rov_tok = rov_tok[0]
-        ov.save_model(rov_tok, str(RR / "openvino_tokenizer.xml"))
 
-        # Belt-and-braces: read the saved tokenizer back and verify its
-        # outputs are fixed at [1, RERANK_SEQ_LEN]. Fail loudly at build
-        # time rather than at first-rerank-request runtime.
-        verify_tok = core.read_model(str(RR / "openvino_tokenizer.xml"))
-        for out in verify_tok.outputs:
+        # Belt-and-braces: verify each rank-2 output is fixed at
+        # [1, RERANK_SEQ_LEN] BEFORE saving. Fail loudly at build time
+        # rather than at first-rerank-request runtime.
+        #
+        # NB: we inspect `rov_tok` in memory directly. Don't try
+        # `core.read_model(saved_xml_path)` here — the saved tokenizer
+        # uses the `openvino-tokenizers` extension's custom ops
+        # (SpecialTokensSplit etc.) which the bare OpenVINO core can't
+        # deserialize without the extension loaded. Hit this 2026-05-08:
+        #   Cannot create SpecialTokensSplit layer ... from unsupported opset: extension
+        for out in rov_tok.outputs:
             shape = out.get_partial_shape()
-            print(f"  rerank tokenizer output `{out.get_any_name()}`: shape={shape}")
-            # Expect a fully-static rank-2 shape; the second dim must be
-            # RERANK_SEQ_LEN. Some tokenizers emit a 1-D `eos_token_id`
-            # output that we skip.
+            name = out.get_any_name() if out.get_names() else "<unnamed>"
+            print(f"  rerank tokenizer output `{name}`: shape={shape}")
+            # Some tokenizers emit a 1-D side output (e.g. eos_token_id);
+            # only assert the static-seq_len constraint on rank-2 outputs.
             if len(shape) == 2:
                 if shape[1].is_dynamic or shape[1].get_length() != RERANK_SEQ_LEN:
                     raise RuntimeError(
-                        f"rerank tokenizer output `{out.get_any_name()}` is not fixed at "
+                        f"rerank tokenizer output `{name}` is not fixed at "
                         f"seq_len={RERANK_SEQ_LEN}: got shape={shape}. NPU will reject the "
                         f"tensor at runtime. Fix: bump openvino_tokenizers, or change "
                         f"reranker.device to GPU/CPU (which accept dynamic shapes)."
                     )
+
+        ov.save_model(rov_tok, str(RR / "openvino_tokenizer.xml"))
 
         print(f"[rerank 5/5] Writing graph.pbtxt (RerankCalculatorOV, target_device={RERANK_DEVICE})")
         # RerankCalculatorOV is the simple single-calculator form (mirrors
