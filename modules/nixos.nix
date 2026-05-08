@@ -658,5 +658,22 @@ in
         "--group-add=${toString config.users.groups.video.gid}"
       ];
     };
+
+    # Force OVMS to restart on every nixos-rebuild that touches the
+    # pull pipeline. Without this, the chain breaks: pullPyScript edits
+    # change pullScript → graphrag-ovms-pull.service config → but the
+    # OVMS container config is unchanged, so systemd never restarts
+    # OVMS, so pull (wantedBy = OVMS) never gets pulled in. Result:
+    # new artifacts on disk, OVMS still serving the old ones in
+    # memory. Hit this 2026-05-08; manual `systemctl start
+    # graphrag-ovms-pull.service` was the workaround.
+    #
+    # restartTriggers takes a list whose hash, when changed, marks the
+    # unit for restart on activation. Embedding pullScript's store
+    # path means any change to the script (or any of its inputs)
+    # forces OVMS restart, which triggers pull via wantedBy.
+    systemd.services."podman-graphrag-ovms".restartTriggers = [
+      pullScript
+    ];
   };
 }
