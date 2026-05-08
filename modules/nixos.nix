@@ -647,7 +647,18 @@ in
       ];
       extraOptions = [
         "--user=0:0"
+        # NPU access (Intel VPU driver, kernel module `intel_vpu`)
         "--device=/dev/accel/accel0"
+        # Intel iGPU access — required when reranker.device = "GPU"
+        # (or "AUTO"). The container also needs /dev/dri/card* so the
+        # OpenCL/L0 driver inside OpenVINO can probe the iGPU. Without
+        # this, the GPU plugin fails at servable load with:
+        #   [GPU] Can't get PERFORMANCE_HINT property as no supported
+        #         devices found...
+        # We pass all DRI render nodes (host has 128 + 129 — usually
+        # 128=Intel iGPU, 129=NVIDIA dGPU but OpenVINO only enumerates
+        # Intel devices, so passing the dGPU node is harmless).
+        "--device=/dev/dri"
         "--group-add=${toString config.users.groups.render.gid}"
         "--group-add=${toString config.users.groups.video.gid}"
       ];
