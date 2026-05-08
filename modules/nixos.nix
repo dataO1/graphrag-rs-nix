@@ -67,7 +67,14 @@ let
     MODELS = Path("/models")
     STAGING = MODELS / ".staging"
     EMB = MODELS / "embeddings"
-    RR = MODELS / "rerank"
+    # The rerank directory MUST be named the same as the mediapipe
+    # graph name. OVMS resolves the calculator's `models_path: "./"`
+    # against `/models/<graph_name>/`, NOT against the directory of
+    # `graph_path` in the config. Mismatch produces:
+    #   ir: Could not open the file: "/models/<graph_name>/./openvino_model.xml"
+    # The embeddings setup gets away with `embeddings` matching `embeddings`
+    # by accident; we make it explicit here.
+    RR = MODELS / RERANK_NAME
 
     if STAGING.exists():
         shutil.rmtree(STAGING)
@@ -244,7 +251,7 @@ let
         (RR / "graph.pbtxt").write_text(rgraph_pbtxt)
 
         mediapipe_entries.append(
-            {"name": RERANK_NAME, "graph_path": "/models/rerank/graph.pbtxt"}
+            {"name": RERANK_NAME, "graph_path": f"/models/{RERANK_NAME}/graph.pbtxt"}
         )
         shutil.rmtree(STAGING, ignore_errors=True)
 
@@ -287,7 +294,7 @@ let
       ARTIFACTS_OK=0
       if [ -f "$MODELS_DIR/config.json" ] && [ -f "$MODELS_DIR/embeddings/openvino_model.xml" ]; then
         ${if cfg.reranker.enable then ''
-        if [ -f "$MODELS_DIR/rerank/openvino_model.xml" ]; then
+        if [ -f "$MODELS_DIR/${cfg.reranker.name}/openvino_model.xml" ]; then
           ARTIFACTS_OK=1
         fi
         '' else ''
