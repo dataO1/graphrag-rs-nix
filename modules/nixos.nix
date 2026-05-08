@@ -165,20 +165,42 @@ let
     shutil.rmtree(STAGING, ignore_errors=True)
 
     # ────────────────────────── RERANKER ──────────────────────────
+    # Mirrors OVMS upstream `export_model.py rerank_ov` recipe
+    # (https://github.com/openvinotoolkit/model_server/blob/main/demos/common/export_models/export_model.py).
+    # Dynamic-shape model + tokenizer, no static reshape, no padding
+    # kwargs — that's what `RerankCalculatorOV` expects. Earlier
+    # attempts to make this work on NPU via static-shape reshape +
+    # forced tokenizer padding were abandoned 2026-05-08: the
+    # calculator does a single batched forward pass per HTTP request
+    # ([N, seq] → set_tensor → infer in `rerank_calculator_ov.cc`),
+    # which is fundamentally incompatible with NPU's batch=1 compile
+    # constraint. Use `target_device: "GPU"` (Intel Arc iGPU on the
+    # Arrow Lake-HX SoC; idle, separate from any NVIDIA dGPU; OVMS'
+    # rerank demo documents CPU/GPU only).
     mediapipe_entries = [
         {"name": "embeddings", "graph_path": "/models/embeddings/graph.pbtxt"}
     ]
 
     if RERANK_MODEL:
-        print(f"[rerank 1/5] Exporting {RERANK_MODEL} via optimum-cli (INT8, text-classification) → {STAGING}")
+        if RERANK_DEVICE == "NPU":
+            raise RuntimeError(
+                "reranker.device=NPU is unsupported by OVMS' RerankCalculatorOV "
+                "(single batched [N,seq] forward pass per request conflicts with "
+                "NPU's batch=1 compile constraint; OVMS' own rerank demo only "
+                "documents CPU/GPU). Use 'GPU' (Intel Arc iGPU on the SoC, idle "
+                "and separate from any NVIDIA dGPU) or 'CPU'. The embedder "
+                "still runs on NPU happily — that path IS upstream-validated."
+            )
+
+        print(f"[rerank 1/3] Exporting {RERANK_MODEL} via optimum-cli (INT8, text-classification) → {STAGING}")
         if STAGING.exists():
             shutil.rmtree(STAGING)
-        # `text-classification` is the OVMS-canonical task for cross-encoders;
-        # for Qwen3-Reranker-0.6B the seq-cls community variant
-        # (`tomaarsen/Qwen3-Reranker-0.6B-seq-cls`) maps cleanly to this task.
-        # The official `Qwen/Qwen3-Reranker-0.6B` is a CausalLM that scores
-        # via "yes"/"no" token logits and would need a different pipeline
-        # (OpenVINO GenAI's TextRerankPipeline) — outside the OVMS path.
+        # `text-classification` is the OVMS-canonical task for
+        # cross-encoders. The seq-cls community variants of Qwen3-Reranker
+        # (`tomaarsen/Qwen3-Reranker-{0.6B,4B,8B}-seq-cls`) map cleanly
+        # to this task. The official `Qwen/Qwen3-Reranker-*` repos are
+        # CausalLMs that score via "yes"/"no" token logits — that path
+        # needs OpenVINO GenAI's `TextRerankPipeline`, NOT OVMS.
         subprocess.check_call([
             "optimum-cli", "export", "openvino",
             "--model", RERANK_MODEL,
@@ -186,71 +208,30 @@ let
             "--weight-format", "int8",
             "--library", "transformers",
             "--trust-remote-code",
+            "--disable-convert-tokenizer",  # we convert it ourselves below
             str(STAGING),
         ])
 
-        print(f"[rerank 2/5] Reshaping rerank IR to [1, {RERANK_SEQ_LEN}]")
-        rmodel = core.read_model(str(STAGING / "openvino_model.xml"))
-        rmodel.reshape({p.get_any_name(): [1, RERANK_SEQ_LEN] for p in rmodel.inputs})
+        print(f"[rerank 2/3] Moving rerank IR + converting tokenizer → {RR}")
+        # Move the rerank model directly — no reshape, no compress-to-fp16.
+        # The IR's input shapes stay dynamic so the calculator can pass
+        # whatever [N, seq] tensor it builds from the request to the
+        # iGPU/CPU plugin (both honor dynamic shapes natively).
+        shutil.move(str(STAGING / "openvino_model.xml"), str(RR / "openvino_model.xml"))
+        shutil.move(str(STAGING / "openvino_model.bin"), str(RR / "openvino_model.bin"))
 
-        print(f"[rerank 3/5] Saving static rerank IR → {RR}/openvino_model.xml")
-        ov.save_model(rmodel, str(RR / "openvino_model.xml"), compress_to_fp16=False)
-
-        print("[rerank 4/5] Converting rerank tokenizer → OpenVINO tokenizer")
+        # Tokenizer: match upstream OVMS' `export_rerank_tokenizer`.
+        # Just `add_special_tokens=False` — the calculator inserts the
+        # special tokens itself. No padding kwargs (model is dynamic,
+        # iGPU/CPU honor the runtime shape).
         rhf_tok = AutoTokenizer.from_pretrained(RERANK_MODEL, trust_remote_code=True)
         rhf_tok.model_max_length = RERANK_SEQ_LEN
-        # OVMS upstream `export_rerank_tokenizer` uses
-        # `convert_tokenizer(hf, add_special_tokens=False)` — but that
-        # produces a DYNAMIC-shape tokenizer, which works on CPU/GPU
-        # (model is also dynamic) but breaks on NPU where the model is
-        # statically reshaped to [1, RERANK_SEQ_LEN]. The NPU plugin
-        # rejects the mismatched tensor with:
-        #   Failed to set tensor. Check 'is_dynamic ||
-        #     port.get_shape() == tensor->get_shape()' failed
-        # Fix: force fixed-length padding via `max_length=RERANK_SEQ_LEN`
-        # + `use_max_padding=True`. Combined with `add_special_tokens=False`
-        # (matching upstream so the calculator's special-token insertion
-        # still works) this yields a tokenizer that always emits
-        # [1, RERANK_SEQ_LEN] regardless of input length. Confirmed on
-        # `tomaarsen/Qwen3-Reranker-0.6B-seq-cls` (Qwen3 BPE tokenizer).
-        rov_tok = convert_tokenizer(
-            rhf_tok,
-            with_detokenizer=False,
-            add_special_tokens=False,
-            max_length=RERANK_SEQ_LEN,
-            use_max_padding=True,
-        )
+        rov_tok = convert_tokenizer(rhf_tok, add_special_tokens=False)
         if isinstance(rov_tok, tuple):
             rov_tok = rov_tok[0]
-
-        # Belt-and-braces: verify each rank-2 output is fixed at
-        # [1, RERANK_SEQ_LEN] BEFORE saving. Fail loudly at build time
-        # rather than at first-rerank-request runtime.
-        #
-        # NB: we inspect `rov_tok` in memory directly. Don't try
-        # `core.read_model(saved_xml_path)` here — the saved tokenizer
-        # uses the `openvino-tokenizers` extension's custom ops
-        # (SpecialTokensSplit etc.) which the bare OpenVINO core can't
-        # deserialize without the extension loaded. Hit this 2026-05-08:
-        #   Cannot create SpecialTokensSplit layer ... from unsupported opset: extension
-        for out in rov_tok.outputs:
-            shape = out.get_partial_shape()
-            name = out.get_any_name() if out.get_names() else "<unnamed>"
-            print(f"  rerank tokenizer output `{name}`: shape={shape}")
-            # Some tokenizers emit a 1-D side output (e.g. eos_token_id);
-            # only assert the static-seq_len constraint on rank-2 outputs.
-            if len(shape) == 2:
-                if shape[1].is_dynamic or shape[1].get_length() != RERANK_SEQ_LEN:
-                    raise RuntimeError(
-                        f"rerank tokenizer output `{name}` is not fixed at "
-                        f"seq_len={RERANK_SEQ_LEN}: got shape={shape}. NPU will reject the "
-                        f"tensor at runtime. Fix: bump openvino_tokenizers, or change "
-                        f"reranker.device to GPU/CPU (which accept dynamic shapes)."
-                    )
-
         ov.save_model(rov_tok, str(RR / "openvino_tokenizer.xml"))
 
-        print(f"[rerank 5/5] Writing graph.pbtxt (RerankCalculatorOV, target_device={RERANK_DEVICE})")
+        print(f"[rerank 3/3] Writing graph.pbtxt (RerankCalculatorOV, target_device={RERANK_DEVICE})")
         # RerankCalculatorOV is the simple single-calculator form (mirrors
         # EmbeddingsCalculatorOV's shape). The OVMS export script also
         # offers a two-servable form (`RerankCalculator`) where tokenizer
@@ -497,7 +478,7 @@ in
 
       model = lib.mkOption {
         type = lib.types.str;
-        default = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls";
+        default = "tomaarsen/Qwen3-Reranker-4B-seq-cls";
         description = ''
           HuggingFace repo of the reranker model. Must support
           `optimum-cli export openvino --task text-classification` —
@@ -506,46 +487,59 @@ in
           seq-cls variant of a decoder-style reranker.
 
           Tested values:
-            - `tomaarsen/Qwen3-Reranker-0.6B-seq-cls` (default; Qwen3-0.6B
-              with cls head; 596 M params; INT8 ≈ 600 MB; multilingual
-              incl. DE; same family as the embedder).
-            - `BAAI/bge-reranker-v2-m3` (XLM-RoBERTa cross-encoder; 568 M
-              params; INT8 ≈ 570 MB; OVMS rerank-demo reference).
+            - `tomaarsen/Qwen3-Reranker-4B-seq-cls` (default; Qwen3-4B
+              with cls head; INT8 ≈ 4 GB; MTEB-R 69.76 — top local
+              score; multilingual incl. DE; targets iGPU which has
+              dynamic system-RAM allocation, not NPU's fixed budget).
+            - `tomaarsen/Qwen3-Reranker-0.6B-seq-cls` (lighter — INT8
+              ≈ 600 MB — for low-memory deploys).
+            - `BAAI/bge-reranker-v2-m3` (XLM-RoBERTa cross-encoder;
+              568 M params; INT8 ≈ 570 MB; OVMS rerank-demo reference).
 
-          AVOID: the official `Qwen/Qwen3-Reranker-0.6B` (CausalLM that
-          scores via "yes"/"no" token logits — needs OpenVINO GenAI's
-          `TextRerankPipeline`, NOT OVMS' `RerankCalculatorOV`).
+          AVOID: the official `Qwen/Qwen3-Reranker-*` repos (CausalLMs
+          that score via "yes"/"no" token logits — need OpenVINO
+          GenAI's `TextRerankPipeline`, NOT OVMS' `RerankCalculatorOV`).
         '';
       };
 
       maxSeqLen = lib.mkOption {
         type = lib.types.int;
-        default = 512;
+        default = 1024;
         description = ''
-          Static seq_len baked into the rerank IR. Cross-encoders see
-          `[CLS] query [SEP] document` packed into one sequence, so this
-          must accommodate query+doc tokens in one tensor. 512 fits the
-          typical RAG case (short query + ~500-token chunk excerpt);
-          raise to 1024 if you commonly send long-form chunks.
+          Sets `tokenizer.model_max_length` — i.e. the upper bound at
+          which the tokenizer truncates inputs. Cross-encoders see
+          `[CLS] query [SEP] document` packed into one sequence, so
+          this must accommodate query+doc tokens together. With the
+          NPU path retired this is no longer a static-shape constraint
+          on the IR; it's just the tokenizer's truncation cap.
+
+          Default 1024 covers a query (~50 tokens) + a ~1500-character
+          chunk excerpt (~400 tokens) with substantial headroom. Raise
+          if you ingest long-form prose; lower for tighter RAG budgets.
         '';
       };
 
       device = lib.mkOption {
-        type = lib.types.enum [ "CPU" "GPU" "NPU" "AUTO" ];
-        default = "NPU";
+        type = lib.types.enum [ "CPU" "GPU" "AUTO" ];
+        default = "GPU";
         description = ''
-          OpenVINO target device for the rerank model. Defaults to NPU
-          but **upstream OVMS does NOT have an NPU validation matrix
-          for rerank** — only CPU and GPU are documented. The NPU path
-          is "syntactically accepted, untested" per the OVMS rerank
-          demo. If the build or compile fails, fall back to "GPU"
-          (Intel iGPU): more memory, more compute, currently idle.
+          OpenVINO target device for the rerank model. NPU is rejected
+          by the build script — OVMS' `RerankCalculatorOV` does a
+          single batched `[N, seq] → set_tensor → infer` per HTTP
+          request, which is fundamentally incompatible with NPU's
+          batch=1 compile constraint. OVMS' own rerank demo only
+          documents CPU/GPU. (Verified 2026-05-08; see
+          `rerank_calculator_ov.cc` upstream + research notes in the
+          vault doc `GraphRAG-rs Reranker Model Selection.md`.)
 
-          Concurrency interaction: when both embeddings and rerank
-          target NPU, the device multiplexes them. Embedding throughput
-          may degrade by up to 50% under simultaneous load — fine for
-          RAG where rerank is bursty (one batch per recall) and
-          embedding is hot path.
+          "GPU" = the Intel Arc iGPU on the Arrow Lake-HX SoC,
+          which is otherwise idle on this hardware. NOT the NVIDIA
+          dGPU — OpenVINO has no NVIDIA backend. Picking "GPU" leaves
+          the NPU 100% dedicated to the embedder (the path that IS
+          upstream-validated).
+
+          "CPU" works too but with much higher latency; reserve for
+          fallback or single-machine debug.
         '';
       };
 
