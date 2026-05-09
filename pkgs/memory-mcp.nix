@@ -5,11 +5,11 @@
 }:
 
 let
-  src = craneLib.cleanCargoSource ../crates/knowledge-mcp;
+  src = craneLib.cleanCargoSource ../crates/memory-mcp;
 
   commonArgs = {
     inherit src;
-    pname = "knowledge-mcp";
+    pname = "memory-mcp";
     version = "0.1.0";
     strictDeps = true;
 
@@ -25,9 +25,9 @@ craneLib.buildPackage (commonArgs // {
   inherit cargoArtifacts;
 
   meta = {
-    description = "Stdio MCP server exposing your local knowledge graph (recall/remember/forget) over a graphrag-rs REST backend";
+    description = "Stdio MCP server exposing the user's long-term memory (recall/remember/forget) over a graphrag-rs REST backend";
     license = lib.licenses.mit;
     platforms = lib.platforms.linux;
-    mainProgram = "knowledge-mcp";
+    mainProgram = "memory-mcp";
   };
 })

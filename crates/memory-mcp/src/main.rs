@@ -1,4 +1,4 @@
-// Stdio MCP server exposing your local knowledge graph.
+// Stdio MCP server exposing the user's long-term memory.
 //
 // Four tools, mapped onto graphrag-server's REST API:
 //
@@ -28,7 +28,7 @@ use std::env;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
-const SERVER_NAME: &str = "knowledge-mcp";
+const SERVER_NAME: &str = "memory-mcp";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone)]
@@ -40,29 +40,23 @@ struct Config {
     /// its lease table per session and the matching `/lease/check` /
     /// `/events/stream` endpoints can report which leased blocks have
     /// since changed. Pi sets this in-process; stdio MCP clients
-    /// (Claude Code, Cursor, …) supply it via this env var on startup.
-    /// Unset → no sessionId injection (server keeps its prior
+    /// (Claude Code, Cursor, …) supply it via `MEMORY_SESSION_ID` on
+    /// startup. Unset → no sessionId injection (server keeps its prior
     /// agent-passes-it-or-nothing semantics).
     session_id: Option<String>,
 }
 
 impl Config {
     fn from_env() -> Self {
-        // KNOWLEDGE_BASE_URL is the canonical name; GRAPHRAG_BASE_URL
-        // stays accepted as a fallback so existing systemd unit envs
-        // and `mcp.json` files don't break the moment the binary is
-        // upgraded.
-        let base_url = env::var("KNOWLEDGE_BASE_URL")
-            .or_else(|_| env::var("GRAPHRAG_BASE_URL"))
-            .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+        let base_url = env::var("MEMORY_BASE_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:17180".to_string());
         Self {
             base_url,
-            timeout_secs: env::var("KNOWLEDGE_TIMEOUT_SECS")
-                .or_else(|_| env::var("GRAPHRAG_TIMEOUT_SECS"))
+            timeout_secs: env::var("MEMORY_TIMEOUT_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(120),
-            session_id: env::var("KNOWLEDGE_SESSION_ID")
+            session_id: env::var("MEMORY_SESSION_ID")
                 .ok()
                 .filter(|s| !s.is_empty()),
         }
@@ -114,7 +108,7 @@ fn tool_definitions() -> Value {
         "tools": [
             {
                 "name": "recall",
-                "description": "Use whenever the user's question depends on knowledge they have personally captured — anything they have written down, decided, planned, or noted. Use even if the user does not explicitly say \"recall\" / \"check\" / \"look up\". Even if you think you already know the answer, if it depends on user-specific facts you MUST recall first.\n\n**THE CHUNK IS THE ANSWER.** When this returns content, the `answer` block + the `excerpt` field on each hit are what you respond from. Do NOT follow up with `read`/`cat`/`find`/`grep` against the source. The classic failure: agent gets a good chunk, gets nervous, guesses a path from the `source` URI, hits ENOENT, runs `find /` to recover — eating 30+ seconds when the chunk was already sufficient.\n\nABSTENTION RULE: before answering any non-trivial question that depends on user-specific context, check whether you can point to the exact passage in THIS conversation that supports your answer. If you cannot — recall.\n\nRESPONSE FIELDS:\n  • `excerpt`      — up to ~800 chars of chunk content. Cite from this directly.\n  • `source`       — a citation URI for provenance. NEVER pass to a shell `read` / `cat`; it is a URI, not a filesystem path.\n  • `absolutePath` — when present, the resolved local-readable filesystem path. The ONLY safe input to a read tool. Absent → source is external; you cannot filesystem-read it.\n  • `lastModified` — recency for tiebreaking. When chunks disagree, prefer the most recent.\n\nMODES — pick by question shape, not retry count:\n  • `default`  — graph-aware hybrid. 95% of questions go here.\n  • `thorough` — hybrid + chunk-vector. Compound or wide searches.\n  • `local`    — entity-centric. For a specific named entity already known to the graph.\n  • `simple`   — vector-only, no LLM (~350 ms). Cheap topic-existence probe.\n\nPARALLELISE — when the user asks several distinct things, fire one `recall` per topic in the same response. Recall is wait-free server-side; sequential is wasted wall-clock time. If a single recall returns 0 hits, do NOT auto-fan-out to paraphrases — try ONE rephrasing or `thorough`, or report the gap.\n\nTIME / HISTORY FILTERS:\n  • `as_of` — RFC 3339; only chunks valid at-or-after this time. Use whenever the user references time (\"today\", \"since X\").\n  • `max_versions_per_doc` — defaults 1 (current only); ≥2 for diff-style questions (\"what changed in X\").\n\nDo NOT call `status` as a warm-up. Just `recall`.",
+                "description": "Use whenever the user's question depends on something in their long-term memory — anything they have written down, decided, planned, or noted. Use even if the user does not explicitly say \"recall\" / \"check\" / \"look up\". Even if you think you already know the answer, if it depends on user-specific facts you MUST recall first.\n\n**THE CHUNK IS THE ANSWER.** When this returns content, the `answer` block + the `excerpt` field on each hit are what you respond from. Do NOT follow up with `read`/`cat`/`find`/`grep` against the source. The classic failure: agent gets a good chunk, gets nervous, guesses a path from the `source` URI, hits ENOENT, runs `find /` to recover — eating 30+ seconds when the chunk was already sufficient.\n\nABSTENTION RULE: before answering any non-trivial question that depends on user-specific context, check whether you can point to the exact passage in THIS conversation that supports your answer. If you cannot — recall. This is a structural check, not a confidence check.\n\nRESPONSE FIELDS:\n  • `excerpt`      — up to ~800 chars of recalled content. Cite from this directly.\n  • `source`       — a citation URI for provenance. NEVER pass to a shell `read` / `cat`; it is a URI, not a filesystem path.\n  • `absolutePath` — when present, the resolved local-readable filesystem path. The ONLY safe input to a read tool. Absent → source is external; you cannot filesystem-read it.\n  • `lastModified` — recency for tiebreaking. When recalled fragments disagree, prefer the most recent.\n\nMODES — pick by question shape, not retry count:\n  • `default`  — relational + semantic recall. 95% of questions go here.\n  • `thorough` — relational + semantic + verbatim. Compound or wide searches.\n  • `local`    — entity-centric. For a specific named entity already known to memory.\n  • `simple`   — verbatim-only, no synthesis (~350 ms). Cheap topic-existence probe.\n\nPARALLELISE — when the user asks several distinct things, fire one `recall` per topic in the same response. Recall is wait-free; sequential is wasted wall-clock time. If a single recall returns 0 hits, do NOT auto-fan-out to paraphrases — try ONE rephrasing or `thorough`, or report the gap.\n\nTIME / HISTORY FILTERS:\n  • `as_of` — RFC 3339; only fragments valid at-or-after this time. Use whenever the user references time (\"today\", \"since X\").\n  • `max_versions_per_doc` — defaults 1 (current only); ≥2 for diff-style questions (\"what changed in X\").\n\nDo NOT call `status` as a warm-up. Just `recall`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -133,7 +127,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "remember",
-                "description": "Add material to the user's knowledge graph. Recallable within ~minute (extraction is async); no follow-up call needed.\n\nPick one body shape:\n  ✅ `path` — single file on disk\n  ✅ `paths_glob` — glob like `/abs/dir/**/*.md`\n  ✅ `paths` — explicit list of files\n  ✅ `content` + `title` — generated/pasted text\n  ❌ Don't read a file in your shell and forward it via `content` — use `path`. Ingestion reads + chunks + indexes atomically.\n\nResponse: `results[]`, per-entry `status` ∈ {ingested, duplicate, unsupported, rejected, error}. `duplicate` = content already indexed; safe to ignore.",
+                "description": "Commit material to the user's long-term memory. Recallable within ~minute (indexing is async); no follow-up call needed.\n\nPick one body shape:\n  ✅ `path` — single file on disk\n  ✅ `paths_glob` — glob like `/abs/dir/**/*.md`\n  ✅ `paths` — explicit list of files\n  ✅ `content` + `title` — generated/pasted text\n  ❌ Don't read a file in your shell and forward it via `content` — use `path`. Ingestion reads + chunks + indexes atomically.\n\nResponse: `results[]`, per-entry `status` ∈ {ingested, duplicate, unsupported, rejected, error}. `duplicate` = content already in memory; safe to ignore.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -149,7 +143,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "forget",
-                "description": "Remove a document from the user's knowledge graph. Accepts either the id supplied to `remember` or the server-assigned UUID. Use sparingly — prefer asking the user before deleting personal material.",
+                "description": "Remove an entry from the user's long-term memory. Accepts either the id supplied to `remember` or the server-assigned UUID. Use sparingly — prefer asking the user before deleting personal material.",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "id": { "type": "string" } },
@@ -158,7 +152,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "status",
-                "description": "Graph counts (documents, entities, relationships, vectors) + `lastBuiltAt`. DO NOT call as a warm-up before `recall` — only call when the user explicitly asks about graph size/build state, or to disambiguate empty-corpus vs no-match after a 0-hit recall.",
+                "description": "Memory health stats (entry counts, entity counts, relationship counts, vector counts) + `lastBuiltAt`. DO NOT call as a warm-up before `recall` — only call when the user explicitly asks about memory size / build state, or to disambiguate empty-memory vs no-match after a 0-hit recall.",
                 "inputSchema": { "type": "object", "properties": {} }
             }
         ]
@@ -209,7 +203,7 @@ async fn call_tool(client: &Client, cfg: &Config, name: &str, args: &Value) -> R
             // table picks up (block_id, etag) per hit. The companion
             // `/lease/check` / `/events/stream` endpoints can then tell
             // a hook script which previously cited blocks have since
-            // changed. No-op when KNOWLEDGE_SESSION_ID is unset.
+            // changed. No-op when MEMORY_SESSION_ID is unset.
             if let Some(sid) = &cfg.session_id {
                 body["sessionId"] = json!(sid);
             }
@@ -349,14 +343,13 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("KNOWLEDGE_MCP_LOG")
-                .or_else(|_| tracing_subscriber::EnvFilter::try_from_env("GRAPHRAG_MCP_LOG"))
+            tracing_subscriber::EnvFilter::try_from_env("MEMORY_MCP_LOG")
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
 
     let cfg = Config::from_env();
-    tracing::info!(base_url = %cfg.base_url, "knowledge-mcp starting");
+    tracing::info!(base_url = %cfg.base_url, "memory-mcp starting");
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(cfg.timeout_secs))

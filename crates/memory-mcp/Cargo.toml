@@ -1,12 +1,12 @@
 [package]
-name = "knowledge-mcp"
+name = "memory-mcp"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Stdio MCP server exposing your local knowledge graph (recall/remember/forget over a graphrag-rs REST backend)"
+description = "Stdio MCP server exposing the user's long-term memory (recall/remember/forget) over a graphrag-rs REST backend"
 
 [[bin]]
-name = "knowledge-mcp"
+name = "memory-mcp"
 path = "src/main.rs"
 
 [dependencies]

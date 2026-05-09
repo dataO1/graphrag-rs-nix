@@ -192,13 +192,13 @@ let
     RUST_LOG = cfg.logLevel;
   } // staleContextEnvVars // ingestEnvVars // cfg.environment;
 
-  mcpClientConfig = pkgs.writeText "knowledge-mcp.json" (builtins.toJSON {
-    mcpServers.knowledge = {
+  mcpClientConfig = pkgs.writeText "memory-mcp.json" (builtins.toJSON {
+    mcpServers.memory = {
       type = "stdio";
-      command = "${cfg.mcpPackage}/bin/knowledge-mcp";
+      command = "${cfg.mcpPackage}/bin/memory-mcp";
       args = [ ];
       env = {
-        KNOWLEDGE_BASE_URL = "http://${cfg.host}:${toString cfg.port}";
+        MEMORY_BASE_URL = "http://${cfg.host}:${toString cfg.port}";
       };
     };
   });
@@ -216,15 +216,15 @@ in
 
     mcpPackage = lib.mkOption {
       type = lib.types.package;
-      default = flakePkgs.knowledge-mcp;
-      defaultText = "graphrag-rs flake's knowledge-mcp output";
-      description = "Stdio MCP server (`knowledge-mcp`) exposing your local knowledge graph (`recall`/`remember`/`forget`/`catalog`/`status`) over the graphrag-rs REST backend.";
+      default = flakePkgs.memory-mcp;
+      defaultText = "graphrag-rs flake's memory-mcp output";
+      description = "Stdio MCP server (`memory-mcp`) exposing the user's long-term memory (`recall`/`remember`/`forget`/`status`) over the graphrag-rs REST backend.";
     };
 
     installMcp = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Add `knowledge-mcp` to home.packages so MCP clients can spawn it.";
+      description = "Add `memory-mcp` to home.packages so MCP clients can spawn it.";
     };
 
     host = lib.mkOption {
@@ -1219,7 +1219,7 @@ in
   config = lib.mkIf cfg.enable {
     home.packages = lib.mkIf cfg.installMcp [ cfg.mcpPackage ];
 
-    xdg.configFile."knowledge-mcp/mcp.json".source = mcpClientConfig;
+    xdg.configFile."memory-mcp/mcp.json".source = mcpClientConfig;
     xdg.configFile."graphrag-rs/pipeline.json" = lib.mkIf (pipelineConfigFile != null) {
       source = pipelineConfigFile;
     };
