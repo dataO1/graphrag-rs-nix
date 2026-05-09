@@ -35,6 +35,15 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 struct Config {
     base_url: String,
     timeout_secs: u64,
+    /// Stable session id for stale-context lease tracking. When set,
+    /// every `recall` body gets a `sessionId` field so the server tags
+    /// its lease table per session and the matching `/lease/check` /
+    /// `/events/stream` endpoints can report which leased blocks have
+    /// since changed. Pi sets this in-process; stdio MCP clients
+    /// (Claude Code, Cursor, …) supply it via this env var on startup.
+    /// Unset → no sessionId injection (server keeps its prior
+    /// agent-passes-it-or-nothing semantics).
+    session_id: Option<String>,
 }
 
 impl Config {
@@ -53,6 +62,9 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(120),
+            session_id: env::var("KNOWLEDGE_SESSION_ID")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 }
@@ -192,6 +204,14 @@ async fn call_tool(client: &Client, cfg: &Config, name: &str, args: &Value) -> R
             }
             if let Some(v) = args.get("max_versions_per_doc") {
                 body["maxVersionsPerDoc"] = v.clone();
+            }
+            // Tag the recall with our session id so the server's lease
+            // table picks up (block_id, etag) per hit. The companion
+            // `/lease/check` / `/events/stream` endpoints can then tell
+            // a hook script which previously cited blocks have since
+            // changed. No-op when KNOWLEDGE_SESSION_ID is unset.
+            if let Some(sid) = &cfg.session_id {
+                body["sessionId"] = json!(sid);
             }
             let r = client.post(format!("{base}/api/query")).json(&body).send().await?;
             r.error_for_status()?.json::<Value>().await?
