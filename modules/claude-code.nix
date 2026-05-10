@@ -82,14 +82,15 @@ in
       programs.claude-code = {
         memory.source = "${assets}/CLAUDE.md";
 
-        # Each value is a path-to-directory; the upstream module
-        # symlinks it into ~/.claude/skills/<name>/ recursively.
-        skills = {
-          consolidate-memory = "${assets}/skills/consolidate-memory";
-          recall-and-think = "${assets}/skills/recall-and-think";
-          document-decision = "${assets}/skills/document-decision";
-          log-session-action = "${assets}/skills/log-session-action";
-        };
+        # `skillsDir` symlinks the whole `${assets}/skills` directory
+        # into `~/.claude/skills/`. We use this instead of the
+        # per-skill `skills.<name>` attrset because the latter's
+        # path-vs-string heuristic (`lib.isPath`) returns false on
+        # interpolated store-path strings, and the fall-through
+        # treats the string as `.md` text content rather than a
+        # path-to-directory. `skillsDir` takes a single path-typed
+        # option that coerces store-path strings cleanly.
+        skillsDir = "${assets}/skills";
 
         mcpServers.memory = {
           type = "stdio";
