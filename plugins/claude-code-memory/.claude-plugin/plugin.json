@@ -1,9 +1,0 @@
-{
-  "name": "claude-code-memory",
-  "version": "0.1.0",
-  "description": "Long-term memory for Claude Code: recall / remember / forget / status MCP, session-log skill, multi-hop recall skill, decision-capture skill, plus lifecycle hooks for staleness checks and consolidation.",
-  "author": {
-    "name": "data01"
-  },
-  "license": "MIT"
-}

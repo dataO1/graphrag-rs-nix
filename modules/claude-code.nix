@@ -1,45 +1,39 @@
 { self }:
 { config, lib, pkgs, ... }:
 
-# Home-manager module that installs the internal claude-code-memory
-# plugin: builds a per-host plugin output (with host-baked .mcp.json
-# and hooks/hooks.json), wraps the user's `claude-code` binary so
-# every invocation passes `--plugin-dir <store-path>`, and symlinks
-# the plugin's CLAUDE.md to ~/.claude/CLAUDE.md (Claude Code's
-# plugin format does not support shipping CLAUDE.md to the agent
-# layer; the symlink is the workaround).
+# Home-manager module that wires the long-term memory feature into
+# the user's existing Claude Code install via the upstream
+# `programs.claude-code` module (nix-community/home-manager). We
+# don't wrap the binary, don't drop a custom plugin, don't write
+# /etc/claude-code/managed-*.json. We just contribute to the
+# upstream module's options:
 #
-# Coupled to graphrag-rs-nix's memory-mcp package and the static
-# plugin source tree at plugins/claude-code-memory/. Bumping the
-# graphrag-rs-nix flake input rolls MCP, hooks, skills, and prompt
-# guidance forward in lockstep.
+#   programs.claude-code.mcpServers.memory  → recall/remember/forget/status MCP
+#   programs.claude-code.skills.<name>      → the four memory skills
+#   programs.claude-code.memory.source      → ~/.claude/CLAUDE.md
+#   programs.claude-code.settings.hooks     → UserPromptSubmit staleness check
+#
+# Bumping graphrag-rs-nix's flake input rolls the MCP server, hooks,
+# skills, and prompt guidance forward in lockstep. Claude Code itself
+# is installed by the upstream module — this module just feeds it.
+#
+# Requires the user to also enable `programs.claude-code.enable` (the
+# upstream module). Enforced via assertion.
 
 let
   cfg = config.programs.claude-code-memory;
 in
 {
   options.programs.claude-code-memory = {
-    enable = lib.mkEnableOption "Internal Claude Code memory plugin";
+    enable = lib.mkEnableOption "Long-term memory feature for Claude Code (recall / remember / forget / status MCP, session-log skill, multi-hop recall skill, decision-capture skill, staleness-check hook)";
 
-    package = lib.mkOption {
-      type = lib.types.package;
-      default = pkgs.claude-code;
-      defaultText = lib.literalExpression "pkgs.claude-code";
-      description = ''
-        The base claude-code package to wrap. Defaults to
-        `pkgs.claude-code`. Override to pin a specific version
-        (e.g. `pkgs.unstable.claude-code` from a `nixpkgs-unstable`
-        input).
-      '';
-    };
-
-    host = lib.mkOption {
+    serverHost = lib.mkOption {
       type = lib.types.str;
       default = "127.0.0.1";
       description = "Host where graphrag-server is reachable.";
     };
 
-    port = lib.mkOption {
+    serverPort = lib.mkOption {
       type = lib.types.port;
       default = 17180;
       description = "Port for graphrag-server's REST API.";
@@ -52,21 +46,11 @@ in
       description = ''
         Stable per-host session id. Tags every memory call so the
         server's lease table buckets recall material under this
-        key. Host-scoped on purpose — Claude Code does not expose
-        per-session ids over the stdio MCP protocol, so all
-        sessions on this host share one bucket.
-      '';
-    };
-
-    installClaudeMd = lib.mkOption {
-      type = lib.types.bool;
-      default = true;
-      description = ''
-        Symlink the plugin's CLAUDE.md to ~/.claude/CLAUDE.md.
-        Disable if you manage CLAUDE.md elsewhere (e.g. via your
-        own home.file). Default true because Claude Code's plugin
-        format does not surface plugin-scoped CLAUDE.md to the
-        agent layer; the symlink is the workaround.
+        key, and the matching `/lease/check` endpoint reports which
+        leased blocks have since changed. Host-scoped on purpose:
+        Claude Code does not expose per-Claude-session ids over
+        the stdio MCP protocol, so all Claude sessions on this
+        host share one lease bucket.
       '';
     };
   };
@@ -76,49 +60,63 @@ in
       system = pkgs.stdenv.hostPlatform.system;
       flakePkgs = self.packages.${system};
 
-      # Per-host plugin output: bakes host/port/sessionId into
-      # .mcp.json + hooks/hooks.json + bin/staleness-check.
-      plugin = pkgs.callPackage (self + "/pkgs/claude-code-memory-plugin.nix") {
-        memory-mcp = flakePkgs.memory-mcp;
-        serverHost = cfg.host;
-        serverPort = cfg.port;
-        sessionId = cfg.sessionId;
-      };
+      assets = flakePkgs.claude-code-memory-plugin;
+      memory-mcp = flakePkgs.memory-mcp;
 
-      # Wrap claude-code so every invocation auto-loads the plugin.
-      # symlinkJoin + makeWrapper would re-derive the whole bin/
-      # tree; we only care about `claude`, so a thin script + the
-      # rest of cfg.package's bin/ via symlink-out is enough.
-      wrapped = pkgs.symlinkJoin {
-        name = "claude-code-with-memory";
-        paths = [ cfg.package ];
-        nativeBuildInputs = [ pkgs.makeWrapper ];
-        postBuild = ''
-          # Wrap only the `claude` entrypoint with --plugin-dir.
-          # Wrapping every binary in $out/bin would also flag-inject
-          # into helper tools (e.g. `claude-code-helper` if upstream
-          # ships one) where --plugin-dir might mean nothing or be
-          # rejected. If upstream renames the entrypoint we'll need
-          # to adjust this; today there's only `claude`.
-          if [ -e "$out/bin/claude" ]; then
-            wrapProgram "$out/bin/claude" \
-              --add-flags "--plugin-dir ${plugin}"
-          else
-            echo "claude binary not found in cfg.package; wrapper not applied" >&2
-            exit 1
-          fi
-        '';
+      stalenessHook = assets.passthru.mkStalenessHook {
+        inherit (cfg) serverHost serverPort sessionId;
       };
     in
     {
-      home.packages = [ wrapped ];
+      assertions = [
+        {
+          assertion = config.programs.claude-code.enable;
+          message = ''
+            programs.claude-code-memory.enable requires
+            programs.claude-code.enable = true (the upstream
+            home-manager module that installs Claude Code itself).
+          '';
+        }
+      ];
 
-      # CLAUDE.md routing. force=true clobbers Claude Code's own
-      # 0-byte placeholder it drops on first launch (without it,
-      # home-manager refuses to overwrite a non-symlink target).
-      home.file.".claude/CLAUDE.md" = lib.mkIf cfg.installClaudeMd {
-        source = "${plugin}/CLAUDE.md";
-        force = true;
+      programs.claude-code = {
+        memory.source = "${assets}/CLAUDE.md";
+
+        # Each value is a path-to-directory; the upstream module
+        # symlinks it into ~/.claude/skills/<name>/ recursively.
+        skills = {
+          consolidate-memory = "${assets}/skills/consolidate-memory";
+          recall-and-think = "${assets}/skills/recall-and-think";
+          document-decision = "${assets}/skills/document-decision";
+          log-session-action = "${assets}/skills/log-session-action";
+        };
+
+        mcpServers.memory = {
+          type = "stdio";
+          command = "${memory-mcp}/bin/memory-mcp";
+          args = [ ];
+          env = {
+            MEMORY_BASE_URL = "http://${cfg.serverHost}:${toString cfg.serverPort}";
+            MEMORY_SESSION_ID = cfg.sessionId;
+          };
+        };
+
+        # Lifecycle hook bindings live in settings.json. The hook
+        # script itself is a writeShellScript path in /nix/store;
+        # settings.json references it by absolute path so we don't
+        # need to also drop it into ~/.claude/hooks/.
+        #
+        # Schema gotcha: each event entry must be a {matcher, hooks: []}
+        # group, NOT a bare {type, command}. Bare-form gets rejected
+        # by Claude Code with "Expected array, but received undefined".
+        settings.hooks.UserPromptSubmit = [
+          {
+            matcher = "";
+            hooks = [
+              { type = "command"; command = toString stalenessHook; }
+            ];
+          }
+        ];
       };
     }
   );
