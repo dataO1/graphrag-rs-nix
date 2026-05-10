@@ -79,18 +79,33 @@ in
         }
       ];
 
+      # Skills installed via home.file directly (NOT via
+      # programs.claude-code.skills / .skillsDir). Reasons:
+      #   - .skills.<name> uses `lib.isPath` to decide between
+      #     "path-to-dir" and "text content"; interpolated
+      #     store-path strings fail the check and get written as
+      #     `.md` files containing the literal path string.
+      #   - .skillsDir owns the whole ~/.claude/skills directory,
+      #     conflicting with users who already wire their own
+      #     skills into ~/.claude/skills/ from another source.
+      # Per-skill home.file entries are flat, conflict-free, and
+      # don't depend on path-vs-string detection. New skills go
+      # in the list below alongside the source/skills/<name>/SKILL.md
+      # — that's the single source of truth for what ships.
+      home.file = lib.listToAttrs (map
+        (name: lib.nameValuePair ".claude/skills/${name}" {
+          source = "${assets}/skills/${name}";
+          recursive = true;
+        })
+        [
+          "consolidate-memory"
+          "recall-and-think"
+          "document-decision"
+          "log-session-action"
+        ]);
+
       programs.claude-code = {
         memory.source = "${assets}/CLAUDE.md";
-
-        # `skillsDir` symlinks the whole `${assets}/skills` directory
-        # into `~/.claude/skills/`. We use this instead of the
-        # per-skill `skills.<name>` attrset because the latter's
-        # path-vs-string heuristic (`lib.isPath`) returns false on
-        # interpolated store-path strings, and the fall-through
-        # treats the string as `.md` text content rather than a
-        # path-to-directory. `skillsDir` takes a single path-typed
-        # option that coerces store-path strings cleanly.
-        skillsDir = "${assets}/skills";
 
         mcpServers.memory = {
           type = "stdio";
