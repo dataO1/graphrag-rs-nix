@@ -32,6 +32,11 @@ let
   # Bakes BASE_URL + SESSION_ID at build time because hooks don't
   # inherit MCP-server env, and the lease bucket must align with the
   # values in `programs.claude-code.mcpServers.memory.env`.
+  # Window after the agent edits a vault file during which we
+  # treat any staleness alert as self-caused and suppress it.
+  # Covers the Obsidian gateway's debounce (~10s) plus comfort.
+  selfEditWindowSecs = 60;
+
   mkStalenessHook = { serverHost, serverPort, sessionId }:
     let
       baseUrl = "http://${serverHost}:${toString serverPort}";
@@ -59,12 +64,30 @@ let
 
       STATE_FILE="''${HOME}/.claude/memory-staleness-''${CC_SESSION_ID}.json"
       LOG_BLOCKED_FLAG="''${HOME}/.claude/log-blocked-this-turn-''${CC_SESSION_ID}"
+      RECENT_SELF_EDIT="''${HOME}/.claude/recent-self-vault-edit-''${CC_SESSION_ID}"
 
       # New user prompt = new turn. Clear the per-turn flags so
       # the next Stop / SubagentStop fire for THIS session can
       # issue exactly one nudge each for this turn.
       rm -f "$LOG_BLOCKED_FLAG"
       rm -f "''${HOME}/.claude/subagent-blocked-this-turn-''${CC_SESSION_ID}"
+
+      # Suppress staleness alerts when THIS session has edited a
+      # vault file within the last ${toString selfEditWindowSecs}s — the alert is
+      # almost certainly self-caused (agent edits the file →
+      # Obsidian gateway re-ingests with new etag → server flags
+      # the prior cited-block etag as stale). The agent already
+      # knows what it just wrote; re-prompting it to recall is
+      # noise. Concurrent-session changes still surface (the
+      # window only covers self-edits from this very session_id).
+      if [ -f "$RECENT_SELF_EDIT" ]; then
+        edit_mtime=$(stat -c %Y "$RECENT_SELF_EDIT" 2>/dev/null || echo 0)
+        now=$(date +%s)
+        age=$((now - edit_mtime))
+        if [ "$age" -lt ${toString selfEditWindowSecs} ]; then
+          exit 0
+        fi
+      fi
 
       # Lease bucket on the server is keyed by MEMORY_SESSION_ID
       # (host-scoped — see modules/claude-code.nix); we don't pass
@@ -163,41 +186,8 @@ let
     # one nudge: logging (broad bar) and distillation (high bar).
     # Most turns produce only logging; some produce both; trivial
     # turns produce neither.
-    "$JQ" -Rsc '{decision:"block",reason:.}' <<'REASON'
-    Before stopping, review the turn you just completed.
-
-    (1) LOGGING — append a session log row?
-    Trigger: turn produced an architectural change, bug fix, non-trivial
-    documentation update (more than a sentence), research finding,
-    decision taken, or unexpected outcome that changes the user's
-    mental model.
-    If YES — invoke /claude-code-memory:log-session-action with one or
-    more rows summarizing what landed. Multiple distinct units of work
-    in one turn = multiple rows.
-    If NO (read-only / trivial / chore) — skip.
-
-    (2) DISTILLATION — write or update a knowledge note?
-    Higher bar. Trigger: turn produced a finding, decision rationale,
-    architectural insight, or unexpected behavior fact that:
-      - a FUTURE session would genuinely benefit from being able to recall
-      - is NOT already covered in an existing vault note (recall first to
-        check; if a similar note exists, edit it instead of creating)
-      - is NOT derivable from current code or git log
-      - is NOT a re-statement of intermediate scratch / rejected hypothesis
-    If YES — invoke /claude-code-memory:consolidate-memory.
-    If NO — skip.
-
-    These are independent. Most turns produce logging only. Some turns
-    produce both. Trivial turns produce neither.
-
-    Don't fabricate either to satisfy this prompt — false-positive
-    distillation noise is worse than missed real insights.
-
-    This nudge fires once per turn; you will not be asked again this turn
-    regardless of which path(s) you take. After invoking the skill(s) — or
-    deciding both paths don't apply — produce a brief acknowledgment and
-    stop.
-    REASON
+    "$JQ" -Rsc '{decision:"block",reason:.}' \
+      <<<"Structural checks before stopping."
 
     exit 0
   '';
@@ -234,51 +224,43 @@ let
     mkdir -p "$(dirname "$SUBAGENT_BLOCKED_FLAG")"
     touch "$SUBAGENT_BLOCKED_FLAG"
 
-    "$JQ" -Rsc '{decision:"block",reason:.}' <<'REASON'
-    A subagent just finished. Before continuing, review what the subagent
-    produced (its final summary is in your context above).
-
-    (1) LOGGING — append a session log row for the subagent's work?
-    Trigger: subagent produced an architectural change, bug fix, non-trivial
-    documentation update (more than a sentence), research finding, decision
-    taken, or unexpected outcome that changes the user's mental model.
-    Subagent hooks don't propagate from parent settings — that's why this
-    nudge runs at the parent level, AT subagent-completion, on behalf of
-    the subagent's work.
-    If YES — invoke /claude-code-memory:log-session-action with one or more
-    rows summarizing what the subagent did and produced. Multiple distinct
-    units of subagent work = multiple rows. Cite the subagent's deliverables
-    (vault paths, decisions made) in the row's Mutations / Outcome cells.
-    If NO (subagent did read-only / trivial / chore work — research probe,
-    file listing, status check that mutated nothing) — skip.
-
-    (2) DISTILLATION — write or update a knowledge note based on the
-    subagent's findings?
-    Higher bar. Trigger: subagent produced a finding, decision rationale,
-    architectural insight, or unexpected behavior fact that:
-      - a FUTURE session would genuinely benefit from being able to recall
-      - is NOT already covered in an existing vault note (recall first to
-        check; if a similar note exists, edit it instead of creating)
-      - is NOT derivable from current code or git log
-      - is NOT a re-statement of intermediate scratch / rejected hypothesis
-    If YES — invoke /claude-code-memory:consolidate-memory.
-    If NO — skip.
-
-    These are independent. Most subagent completions produce logging only.
-    Rare ones produce both. Trivial subagent completions produce neither.
-
-    Don't fabricate either to satisfy this prompt — false-positive
-    distillation noise is worse than missed real insights.
-
-    This nudge fires once per turn at the FIRST SubagentStop; subsequent
-    subagent completions in the same parent turn will not re-trigger it.
-    Your end-of-turn Stop nudge will fire separately for the parent's
-    own work (if any). After invoking the skill(s) — or deciding both
-    paths don't apply — proceed with whatever the parent was doing.
-    REASON
+    "$JQ" -Rsc '{decision:"block",reason:.}' \
+      <<<"Subagent finished — structural checks for its work."
 
     exit 0
   '';
+
+  # PostToolUse hook for Write/Edit/MultiEdit. Touches a
+  # per-Claude-session sentinel file when the touched path is
+  # under the vault root. The staleness hook checks the
+  # sentinel's mtime and suppresses staleness alerts within
+  # `selfEditWindowSecs` after a self-edit (the agent caused
+  # the staleness, no point re-alerting it).
+  #
+  # Wired with matcher "Write|Edit|MultiEdit" in
+  # programs.claude-code.settings.hooks.PostToolUse.
+  mkPostuseEditTracker = { vaultRoot }:
+    writeShellScript "claude-memory-postuse-edit-tracker" ''
+      set -uo pipefail
+
+      JQ='${jq}/bin/jq'
+
+      PAYLOAD="$(cat 2>/dev/null || echo '{}')"
+      CC_SESSION_ID="$(printf %s "$PAYLOAD" | "$JQ" -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")"
+      TOUCHED="$(printf %s "$PAYLOAD" | "$JQ" -r '.tool_input.file_path // empty' 2>/dev/null || echo "")"
+
+      # Only record vault-root writes; other writes (e.g. dotfiles
+      # repo, /tmp) shouldn't suppress staleness for vault-leased
+      # blocks.
+      case "$TOUCHED" in
+        ${vaultRoot}/*)
+          mkdir -p "''${HOME}/.claude"
+          : > "''${HOME}/.claude/recent-self-vault-edit-''${CC_SESSION_ID}"
+          ;;
+      esac
+
+      exit 0
+    '';
 in
 runCommand "claude-code-memory-assets"
 {
@@ -288,7 +270,7 @@ runCommand "claude-code-memory-assets"
     platforms = lib.platforms.linux;
   };
   passthru = {
-    inherit mkStalenessHook mkStopHook mkSubagentStopHook;
+    inherit mkStalenessHook mkStopHook mkSubagentStopHook mkPostuseEditTracker;
     inherit memory-mcp;
   };
 } ''

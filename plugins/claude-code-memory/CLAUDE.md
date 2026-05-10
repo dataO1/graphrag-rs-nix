@@ -18,20 +18,28 @@ synthesis across multiple recorded sources, use the
 `/claude-code-memory:recall-and-think` skill instead of stitching
 ad-hoc recalls.
 
-**Logging structural check.** Before sending any reply that
-follows a meaningful unit of work, ask: *"Did this turn produce
-an architectural change, a bug fix, a non-trivial documentation
-update (more than a sentence), a research finding, a decision
-taken, or an unexpected outcome that changes the user's mental
-model?"* If YES — your FIRST action MUST be
-`/claude-code-memory:log-session-action`, BEFORE you reply.
-If NO (single-sentence tweak, read-only operation, trivial
-chore) — skip. Not a confidence check, a structural check.
+**Logging structural check.** Before replying after a meaningful
+unit of work, ask: *"Did this turn produce an architectural
+change, a bug fix, a non-trivial documentation update (more than
+a sentence), a research finding, a decision taken, or an
+unexpected outcome that changes the user's mental model?"* If
+YES — invoke `/claude-code-memory:log-session-action` BEFORE
+replying. Each meaningful turn gets its own row; don't batch or
+skip "because we already logged earlier".
 
-When the user gives multiple consecutive nudges in the same
-session — corrections, additions, refinements — each meaningful
-turn still gets its own log row. Don't batch and don't skip
-because "we already logged earlier".
+**Distillation structural check.** Higher bar. Ask: *"Did this
+turn produce a finding / decision rationale / architectural
+insight / unexpected behavior fact that (a) a future session
+would genuinely benefit from being able to recall, (b) is NOT
+already covered in an existing vault note, (c) is NOT derivable
+from current code or git log, and (d) is NOT a re-statement of
+intermediate scratch?"* If YES — invoke
+`/claude-code-memory:consolidate-memory`. False-positive
+distillation noise is worse than missed real insights — when in
+doubt, skip.
+
+These are independent. Most turns log only. Some turns produce
+both. Trivial turns produce neither.
 
 When the user says "wrap up", "save what we learned", or you
 sense the session is winding down, invoke

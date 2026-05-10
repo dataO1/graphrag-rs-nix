@@ -53,6 +53,20 @@ in
         host share one lease bucket.
       '';
     };
+
+    vaultRoot = lib.mkOption {
+      type = lib.types.str;
+      default = "${config.home.homeDirectory}/Notes";
+      defaultText = lib.literalExpression ''"''${config.home.homeDirectory}/Notes"'';
+      description = ''
+        Absolute path to the user's knowledge corpus root. Used by
+        the PostToolUse edit-tracker hook to decide whether a
+        Write/Edit/MultiEdit on a given path counts as a self-edit
+        for staleness suppression. Should match the Obsidian
+        gateway's vault path and the server's
+        `services.graphrag-rs.ingest.allowedRoots`.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable (
@@ -77,6 +91,14 @@ in
       # so this is the only way to reach subagent-completion
       # from the parent's settings).
       subagentStopHook = assets.passthru.mkSubagentStopHook;
+
+      # PostToolUse edit tracker. Touches a per-session sentinel
+      # when the agent writes/edits a file under the vault root,
+      # so the staleness hook can suppress alerts that are
+      # almost-certainly self-caused.
+      postuseEditTracker = assets.passthru.mkPostuseEditTracker {
+        inherit (cfg) vaultRoot;
+      };
     in
     {
       assertions = [
@@ -182,6 +204,19 @@ in
               matcher = "";
               hooks = [
                 { type = "command"; command = toString subagentStopHook; }
+              ];
+            }
+          ];
+
+          # PostToolUse edit tracker: records vault-root writes
+          # so the staleness hook can suppress self-caused
+          # alerts. Filtered to file-mutating tools only — Read
+          # / Bash / Glob etc. don't need tracking.
+          PostToolUse = [
+            {
+              matcher = "Write|Edit|MultiEdit";
+              hooks = [
+                { type = "command"; command = toString postuseEditTracker; }
               ];
             }
           ];
