@@ -216,7 +216,22 @@ async fn call_tool(client: &Client, cfg: &Config, name: &str, args: &Value) -> R
             r.error_for_status()?.json::<Value>().await?
         }
         "remember" => {
-            let r = client.post(format!("{base}/api/documents")).json(args).send().await?;
+            // Server's /api/documents requires a `source` URI for
+            // content-form ingest (provenance) — but path-form
+            // synthesizes one from the file path. Auto-synthesize
+            // an `mcp://generated/<uuid>` URI for content-form
+            // calls when the caller didn't supply one, so the
+            // agent contract stays as just `content` + `title`
+            // without exposing implementation details. Decision
+            // 2026-05-10 — see GraphRAG-rs Memory System Roadmap.
+            let mut body = args.clone();
+            let has_content = body.get("content").is_some();
+            let has_source = body.get("source").is_some();
+            if has_content && !has_source {
+                let synthesized = format!("mcp://generated/{}", uuid::Uuid::new_v4());
+                body["source"] = json!(synthesized);
+            }
+            let r = client.post(format!("{base}/api/documents")).json(&body).send().await?;
             r.error_for_status()?.json::<Value>().await?
         }
         "forget" => {
