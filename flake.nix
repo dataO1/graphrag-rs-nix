@@ -37,6 +37,13 @@
       homeManagerModules.default = import ./modules/home-manager.nix { inherit self; };
       homeManagerModules.graphrag-rs = self.homeManagerModules.default;
 
+      # Internal Claude Code plugin: long-term memory tools, skills,
+      # hooks, prompt guidance. Wraps the user's `claude` binary with
+      # --plugin-dir so the plugin loads on every session (Claude Code
+      # has no native declarative local-plugin loading mechanism).
+      homeManagerModules.claude-code-memory =
+        import ./modules/claude-code.nix { inherit self; };
+
       # System-level NPU embedding service: OVMS container + static-shape
       # model build oneshot. Pair with the home-manager module to point
       # graphrag-server at it (or hit /v3/embeddings directly from any
@@ -67,10 +74,18 @@
         knowledge-watcher = pkgs.callPackage ./pkgs/knowledge-watcher.nix {
           inherit craneLib;
         };
+
+        # Default-args build of the Claude Code memory plugin — useful
+        # for `nix build .#claude-code-memory-plugin` smoke tests. Hosts
+        # that consume this via the home-manager module override host /
+        # port / sessionId per-deployment.
+        claude-code-memory-plugin = pkgs.callPackage ./pkgs/claude-code-memory-plugin.nix {
+          inherit memory-mcp;
+        };
       in
       {
         packages = {
-          inherit graphrag-rs memory-mcp knowledge-watcher;
+          inherit graphrag-rs memory-mcp knowledge-watcher claude-code-memory-plugin;
           graphrag-server = graphrag-rs.server;
           default = graphrag-rs.server;
         };
