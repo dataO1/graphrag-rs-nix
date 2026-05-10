@@ -96,6 +96,12 @@ in
         (name: lib.nameValuePair ".claude/skills/${name}" {
           source = "${assets}/skills/${name}";
           recursive = true;
+          # `force = true` clobbers any pre-existing entry at the
+          # target — most commonly a stale whole-dir symlink left by
+          # a previous generation that wired ~/.claude/skills as one
+          # directory-level home.file. Without `force` home-manager
+          # refuses to overwrite non-symlink-it-owns targets.
+          force = true;
         })
         [
           "consolidate-memory"
