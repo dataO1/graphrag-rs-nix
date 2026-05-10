@@ -39,10 +39,15 @@ supersedes or amends it (link to it; note the change).
 
 ### Step 2 — Determine target file
 
-- Ongoing project topics → `~/Notes/🗂️ Collection/<Topic>.md`
-  (append a `## Decision: <date> — <one-liner>` section).
-- New standalone decision → new file
-  `~/Notes/🗂️ Collection/Decision — <Title>.md`.
+Use the storage conventions from the plugin's CLAUDE.md "Storage
+conventions" section. In short:
+
+- Ongoing project topics → append a `## Decision: <date> — <one-liner>`
+  section to the existing topic note in the user's reference
+  material.
+- New standalone decision → create a new note titled
+  `Decision — <Title>` alongside the rest of the reference
+  material.
 - If unclear which topic owns the decision, ask the user before
   writing.
 

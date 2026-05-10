@@ -94,19 +94,19 @@ in
         paths = [ cfg.package ];
         nativeBuildInputs = [ pkgs.makeWrapper ];
         postBuild = ''
-          # Wrap every executable in $out/bin with --plugin-dir.
-          # Claude Code's binary is typically named `claude`; if the
-          # upstream renames it later, this still wraps whatever's
-          # there.
-          for bin in "$out/bin"/*; do
-            if [ -f "$bin" ] || [ -L "$bin" ]; then
-              # symlinkJoin produces symlinks; replace with wrapped
-              # versions. wrapProgram handles the symlink-target
-              # resolution for us.
-              wrapProgram "$bin" \
-                --add-flags "--plugin-dir ${plugin}"
-            fi
-          done
+          # Wrap only the `claude` entrypoint with --plugin-dir.
+          # Wrapping every binary in $out/bin would also flag-inject
+          # into helper tools (e.g. `claude-code-helper` if upstream
+          # ships one) where --plugin-dir might mean nothing or be
+          # rejected. If upstream renames the entrypoint we'll need
+          # to adjust this; today there's only `claude`.
+          if [ -e "$out/bin/claude" ]; then
+            wrapProgram "$out/bin/claude" \
+              --add-flags "--plugin-dir ${plugin}"
+          else
+            echo "claude binary not found in cfg.package; wrapper not applied" >&2
+            exit 1
+          fi
         '';
       };
     in

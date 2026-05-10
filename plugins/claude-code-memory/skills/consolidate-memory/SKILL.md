@@ -1,6 +1,6 @@
 ---
 name: consolidate-memory
-description: Distil the current session's findings, decisions, and meaningful actions into long-term memory. Use at session end, before context compaction (auto-fires on PreCompact), or when the user says "wrap up", "save what we learned", "consolidate", "document this", or similar. MUST trigger if the session produced any of: a research finding worth keeping, a decision with rationale, an architectural insight, an unexpected outcome that changes the user's mental model, or noteworthy actions that were not yet logged via log-session-action.
+description: Distil the current session's findings, decisions, and meaningful actions into long-term memory. Use at session end, when the user says "wrap up", "save what we learned", "consolidate", "document this", or when you sense the session is winding down (user thanks you, says they're going AFK, or context is filling up). MUST trigger if the session produced any of: a research finding worth keeping, a decision with rationale, an architectural insight, an unexpected outcome that changes the user's mental model, or noteworthy actions that were not yet logged via log-session-action.
 allowed-tools: "Bash(date *) Bash(ls *) Read Write Edit Glob Grep"
 ---
 
@@ -17,15 +17,16 @@ the most common failure:
 
 1. **Distilled knowledge** — durable findings, decisions,
    architectural insights, project models. Written as Markdown
-   notes in the appropriate vault folder (`~/Notes/🗂️ Collection/`
-   for technical/reference material; `~/Notes/📔 Journal/` for
-   dated reflections). Upserted via `mcp__memory__remember` if
-   the same topic already has a note (the server's similarity
-   check handles dedup).
+   notes into the user's recorded material per the conventions in
+   the plugin's CLAUDE.md "Storage conventions" section (subject-
+   topic notes go alongside other reference material; dated
+   reflections go in the journal area). Upserted via
+   `mcp__memory__remember` if the same topic already has a note
+   (the server's similarity check handles dedup).
 2. **Catch-up log rows** — rows for meaningful actions that
    should have been logged via the `log-session-action` skill but
    weren't. Written as table rows in today's session log file
-   (same format as `log-session-action`).
+   (same format and same path convention as `log-session-action`).
 
 Different files. Different cadences. Don't write a knowledge
 note that should be a log row. Don't write a log row that should
@@ -35,9 +36,8 @@ be a knowledge note.
 
 - User says "wrap up", "save what we learned", "consolidate",
   "document this", "let's checkpoint".
-- `PreCompact` hook fires (auto-invokes this skill).
 - Session is winding down: user thanks the agent, says they're
-  going AFK, says "ship it".
+  going AFK, says "ship it", or context window is visibly filling.
 - The session produced a research finding, a decision, an
   architectural insight, or an unexpected outcome and these have
   not yet been distilled.
@@ -91,12 +91,12 @@ session log following the `log-session-action` skill's format
 exactly. Multiple unlogged actions = multiple rows. Do not
 consolidate them into a single fat row.
 
-### Step 4 — Update vault frontmatter
+### Step 4 — Update frontmatter
 
 Each new or updated knowledge note carries a `related: [[...]]`
-list pointing at relevant other notes. Each new log row
-contributes its `Related` topics to the session file's
-frontmatter `topics:` union.
+list pointing at other relevant notes in the user's recorded
+material. Each new log row contributes its `Related` topics to
+the session file's frontmatter `topics:` union.
 
 ## Quality bar
 

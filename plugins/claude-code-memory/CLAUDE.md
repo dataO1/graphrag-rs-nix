@@ -29,3 +29,24 @@ When the user says "wrap up", "save what we learned", or you
 sense the session is winding down, invoke
 `/claude-code-memory:consolidate-memory` to distil findings and
 catch up on missed log rows.
+
+## Storage conventions
+
+Both skills above write Markdown files into the user's knowledge
+corpus, which the long-term memory backend re-indexes
+automatically. The two locations the skills need:
+
+- **Session logs**: `~/Notes/📔 Journal/agent-log/<YYYY-MM-DD>/<host>-<agent>-<HHMM>.md`.
+  One file per session; per-row table format. Append-only within a
+  session; never split a row's content into a sibling document.
+- **Knowledge notes**: `~/Notes/🗂️ Collection/<Title>.md`.
+  Subject-topic notes (architecture, decisions, distilled findings,
+  reference material). Front-matter conventions match the existing
+  vault layout — read a sibling note in the same folder before
+  writing if unsure.
+
+The corpus location is operator-configured; if the user's
+filesystem layout differs from above, update this section in
+the host's plugin and the skills will pick up the new paths.
+The skills themselves do not hard-code paths — they reference
+the conventions established here.

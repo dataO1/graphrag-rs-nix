@@ -33,21 +33,23 @@ DO NOT trigger after:
 
 ## Procedure
 
-1. **Determine session log file path.** Today's date in `YYYY-MM-DD`
-   format (use `Bash(date +%Y-%m-%d)`); host (read from `$HOSTNAME`);
-   agent is `claude-code`; session start time is the timestamp from
-   the first log entry of this session if known, else now in `HHMM`.
-   Path: `~/Notes/📔 Journal/agent-log/<YYYY-MM-DD>/<host>-claude-code-<HHMM>.md`.
+1. **Determine session log file path.** Use the session-log
+   convention from the always-on memory guidance (the plugin's
+   CLAUDE.md "Storage conventions" section). At time of writing
+   the convention is one file per session with date / host /
+   agent / start-time keys; the skill must follow whatever the
+   guidance currently says, not hard-code a path here.
 
 2. **Check if today's session log file exists.** If yes → append a
    row. If no → create with frontmatter + table header, then append
    the first row.
 
 3. **Resolve topics.** From the work just done, list the topics
-   touched (entity / project / concept names, e.g. `[[mesh]]`,
-   `[[graphrag-rs-nix]]`, `[[memory-system]]`). These go in the
-   row's `Related` column (knowledge docs only — never another log
-   file) AND get unioned into the file's frontmatter `topics:` list.
+   touched (entity / project / concept names as wiki-links, e.g.
+   `[[project-a]]`, `[[component-x]]`, `[[concept-y]]`). These go
+   in the row's `Related` column (knowledge docs only — never
+   another log file) AND get unioned into the file's frontmatter
+   `topics:` list.
 
 4. **Compose the row.** Five-column markdown table row:
 
@@ -64,8 +66,9 @@ DO NOT trigger after:
    - `Outcome` — one phrase: what concretely landed. Not "done";
      "switch landed clean" / "tests pass" / "diff merged".
    - `Related` — `[[wiki-link]]` references to knowledge docs
-     (vault notes, design docs, READMEs). NEVER a link to another
-     log file. If multiple, comma-separated.
+     (other notes in the user's recorded material — design docs,
+     reference notes, READMEs). NEVER a link to another log
+     file. If multiple, comma-separated.
 
 5. **Cells stay terse.** If a row would need spillover content,
    split into multiple rows instead. Do NOT create a sibling log
@@ -83,19 +86,19 @@ DO NOT trigger after:
 
 ```markdown
 ---
-date: 2026-05-10
-session_start: 2026-05-10T14:32:11+02:00
-session_end: 2026-05-10T16:08:47+02:00
-host: neo-16
-agent: claude-code
-topics: [[memory-system]], [[graphrag-rs-nix]]
+date: <YYYY-MM-DD>
+session_start: <RFC3339 timestamp>
+session_end: <RFC3339 timestamp — updated on every append>
+host: <hostname>
+agent: <agent name>
+topics: [[topic-a]], [[topic-b]]
 ---
 
-# Agent log — 2026-05-10 14:32 — neo-16 / claude-code
+# Agent log — <YYYY-MM-DD HH:MM> — <host> / <agent>
 
 | Time | Actions | Mutations | Why | Outcome | Related |
 |------|---------|-----------|-----|---------|---------|
-| 14:32:11 | Renamed `knowledge-mcp` → `memory-mcp` across both repos | `crates/memory-mcp/`, `flake.nix`, `flake.lock` | "knowledge graph" leaked implementation; "long-term memory" matches agent mental model | switch landed clean | [[Agent Extension Primitives]] |
+| <HH:MM:SS> | <verb-phrase action> | <files / configs touched> | <one-sentence motivation> | <what concretely landed> | [[knowledge-doc]] |
 ```
 
 ## What the row is NOT
