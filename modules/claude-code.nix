@@ -71,6 +71,12 @@ in
       # keyed on the Claude session_id parsed from hook stdin —
       # parallel sessions don't race.
       stopHook = assets.passthru.mkStopHook;
+
+      # Subagent-completion nudge. Fires in the PARENT's session
+      # at SubagentStop (subagents don't inherit parent's hooks
+      # so this is the only way to reach subagent-completion
+      # from the parent's settings).
+      subagentStopHook = assets.passthru.mkSubagentStopHook;
     in
     {
       assertions = [
@@ -155,6 +161,27 @@ in
               matcher = "";
               hooks = [
                 { type = "command"; command = toString stopHook; }
+              ];
+            }
+          ];
+
+          # SubagentStop hook: fires in the PARENT's session when
+          # a subagent finishes. Same block-and-continue mechanism
+          # as Stop but the block reason routes the parent through
+          # logging+distillation evaluation on behalf of the
+          # subagent's work. Subagents don't inherit parent's
+          # settings.json hooks (Claude Code-specific isolation;
+          # see Agent Extension Primitives Part 4 "Subagent hook
+          # scope") so this is the only way to enforce
+          # post-subagent-completion logging from a single point.
+          # Separate flag file from Stop so a parent turn can
+          # produce up to two nudges: one for subagent's work,
+          # one for parent's own work. Both per-session.
+          SubagentStop = [
+            {
+              matcher = "";
+              hooks = [
+                { type = "command"; command = toString subagentStopHook; }
               ];
             }
           ];
