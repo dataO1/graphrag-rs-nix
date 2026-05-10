@@ -18,12 +18,20 @@ synthesis across multiple recorded sources, use the
 `/claude-code-memory:recall-and-think` skill instead of stitching
 ad-hoc recalls.
 
-After completing a meaningful unit of work — an architectural
-change, a bug fix, a non-trivial documentation update,
-research that produced a finding, a decision, or an unexpected
-outcome — invoke `/claude-code-memory:log-session-action` to
-append a row to today's session log. Single-sentence doc tweaks
-and routine read-only operations do NOT trigger.
+**Logging structural check.** Before sending any reply that
+follows a meaningful unit of work, ask: *"Did this turn produce
+an architectural change, a bug fix, a non-trivial documentation
+update (more than a sentence), a research finding, a decision
+taken, or an unexpected outcome that changes the user's mental
+model?"* If YES — your FIRST action MUST be
+`/claude-code-memory:log-session-action`, BEFORE you reply.
+If NO (single-sentence tweak, read-only operation, trivial
+chore) — skip. Not a confidence check, a structural check.
+
+When the user gives multiple consecutive nudges in the same
+session — corrections, additions, refinements — each meaningful
+turn still gets its own log row. Don't batch and don't skip
+because "we already logged earlier".
 
 When the user says "wrap up", "save what we learned", or you
 sense the session is winding down, invoke

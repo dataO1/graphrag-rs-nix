@@ -1,6 +1,6 @@
 ---
 name: log-session-action
-description: Append a row to today's session log table after a meaningful unit of work concludes. MUST trigger after an architectural change, a bug fix, a non-trivial documentation update (more than a sentence), a research session that produced a finding, a decision taken, or an unexpected outcome that changes how the user should think about the system. Single-sentence doc tweaks, routine read-only operations, and trivial chores do NOT trigger.
+description: Append a row to today's session log table BEFORE replying to the user, whenever the just-completed turn produced any of: an architectural change, a bug fix, a non-trivial documentation update (more than a sentence), a research finding, a decision taken, or an unexpected outcome that changes the user's mental model. MUST be invoked structurally — before composing the reply, ask "did this turn produce one of those?" and if yes, fire this skill first. Each meaningful turn gets its own row, even if you logged a different one earlier in the session. Single-sentence tweaks, read-only operations (recall/grep/read), and trivial chores (git status, ls) do NOT trigger.
 allowed-tools: "Bash(date *) Bash(mkdir *) Bash(ls *) Bash(test *) Read Write Edit Glob"
 ---
 
