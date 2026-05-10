@@ -40,17 +40,36 @@ let
       set -uo pipefail
 
       BASE_URL='${baseUrl}'
-      SESSION_ID='${sessionId}'
-      STATE_FILE="''${HOME}/.claude/memory-staleness.json"
+      MEMORY_SESSION_ID='${sessionId}'
 
       CURL='${curl}/bin/curl'
       JQ='${jq}/bin/jq'
 
-      # Drain Claude's stdin payload — unused for /lease/check;
-      # leaving stdin un-read can confuse the hook host.
-      cat >/dev/null 2>&1 || true
+      # Read Claude's hook payload off stdin and extract its
+      # per-Claude-session id. Per-session state files are
+      # essential for parallel/multi-agent workflows — a single
+      # global file races between concurrent sessions and
+      # corrupts each other's snapshots and turn flags.
+      #
+      # `session_id` field has been part of every hook payload
+      # since Claude Code's hooks API stabilized; fall back to
+      # "unknown" only if absent (e.g. tests piping fake input).
+      PAYLOAD="$(cat 2>/dev/null || echo '{}')"
+      CC_SESSION_ID="$(printf %s "$PAYLOAD" | "$JQ" -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")"
 
-      response="$("$CURL" -fsS -m 2 "$BASE_URL/lease/check?session_id=$SESSION_ID" 2>/dev/null || true)"
+      STATE_FILE="''${HOME}/.claude/memory-staleness-''${CC_SESSION_ID}.json"
+      LOG_BLOCKED_FLAG="''${HOME}/.claude/log-blocked-this-turn-''${CC_SESSION_ID}"
+
+      # New user prompt = new turn. Clear the Stop-hook's
+      # blocked-once flag so the next Stop fire for THIS
+      # session can issue exactly one nudge for this turn.
+      rm -f "$LOG_BLOCKED_FLAG"
+
+      # Lease bucket on the server is keyed by MEMORY_SESSION_ID
+      # (host-scoped — see modules/claude-code.nix); we don't pass
+      # the per-Claude-session id here because the MCP's lease
+      # tracking is host-scoped by design.
+      response="$("$CURL" -fsS -m 2 "$BASE_URL/lease/check?session_id=$MEMORY_SESSION_ID" 2>/dev/null || true)"
       [ -z "$response" ] && exit 0
 
       current_stale="$(printf %s "$response" | "$JQ" -c '
@@ -104,6 +123,83 @@ let
 
       exit 0
     '';
+
+  # End-of-turn nudge. Fires on `Stop` (Claude finishes its
+  # response and is about to go idle). Uses the documented
+  # `{decision: "block", reason: "..."}` mechanism to force the
+  # agent to take ONE more turn handling the reason — typically
+  # invoking log-session-action and/or consolidate-memory if
+  # the just-finished turn produced something log- or
+  # distil-worthy.
+  #
+  # Loop guard: per-Claude-session blocked-once flag. The
+  # UserPromptSubmit hook clears the flag at start of each new
+  # user turn, so we get exactly one nudge per turn per session.
+  # Parallel sessions don't race — the flag path is keyed on the
+  # Claude session_id parsed from hook stdin.
+  mkStopHook = writeShellScript "claude-memory-stop-nudge" ''
+    set -uo pipefail
+
+    JQ='${jq}/bin/jq'
+
+    # Parse session_id off hook stdin so the loop-guard flag is
+    # per-session (parallel sessions / multi-agent workflows
+    # would race on a single global flag).
+    PAYLOAD="$(cat 2>/dev/null || echo '{}')"
+    CC_SESSION_ID="$(printf %s "$PAYLOAD" | "$JQ" -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")"
+
+    LOG_BLOCKED_FLAG="''${HOME}/.claude/log-blocked-this-turn-''${CC_SESSION_ID}"
+
+    # Already nudged once this turn? Allow stop normally.
+    if [ -e "$LOG_BLOCKED_FLAG" ]; then
+      exit 0
+    fi
+
+    mkdir -p "$(dirname "$LOG_BLOCKED_FLAG")"
+    touch "$LOG_BLOCKED_FLAG"
+
+    # The block reason. Two independent evaluations bundled into
+    # one nudge: logging (broad bar) and distillation (high bar).
+    # Most turns produce only logging; some produce both; trivial
+    # turns produce neither.
+    "$JQ" -Rsc '{decision:"block",reason:.}' <<'REASON'
+    Before stopping, review the turn you just completed.
+
+    (1) LOGGING — append a session log row?
+    Trigger: turn produced an architectural change, bug fix, non-trivial
+    documentation update (more than a sentence), research finding,
+    decision taken, or unexpected outcome that changes the user's
+    mental model.
+    If YES — invoke /claude-code-memory:log-session-action with one or
+    more rows summarizing what landed. Multiple distinct units of work
+    in one turn = multiple rows.
+    If NO (read-only / trivial / chore) — skip.
+
+    (2) DISTILLATION — write or update a knowledge note?
+    Higher bar. Trigger: turn produced a finding, decision rationale,
+    architectural insight, or unexpected behavior fact that:
+      - a FUTURE session would genuinely benefit from being able to recall
+      - is NOT already covered in an existing vault note (recall first to
+        check; if a similar note exists, edit it instead of creating)
+      - is NOT derivable from current code or git log
+      - is NOT a re-statement of intermediate scratch / rejected hypothesis
+    If YES — invoke /claude-code-memory:consolidate-memory.
+    If NO — skip.
+
+    These are independent. Most turns produce logging only. Some turns
+    produce both. Trivial turns produce neither.
+
+    Don't fabricate either to satisfy this prompt — false-positive
+    distillation noise is worse than missed real insights.
+
+    This nudge fires once per turn; you will not be asked again this turn
+    regardless of which path(s) you take. After invoking the skill(s) — or
+    deciding both paths don't apply — produce a brief acknowledgment and
+    stop.
+    REASON
+
+    exit 0
+  '';
 in
 runCommand "claude-code-memory-assets"
 {
@@ -113,7 +209,7 @@ runCommand "claude-code-memory-assets"
     platforms = lib.platforms.linux;
   };
   passthru = {
-    inherit mkStalenessHook;
+    inherit mkStalenessHook mkStopHook;
     inherit memory-mcp;
   };
 } ''

@@ -66,6 +66,11 @@ in
       stalenessHook = assets.passthru.mkStalenessHook {
         inherit (cfg) serverHost serverPort sessionId;
       };
+
+      # End-of-turn nudge. Per-session loop-guard via flag file
+      # keyed on the Claude session_id parsed from hook stdin —
+      # parallel sessions don't race.
+      stopHook = assets.passthru.mkStopHook;
     in
     {
       assertions = [
@@ -131,14 +136,29 @@ in
         # Schema gotcha: each event entry must be a {matcher, hooks: []}
         # group, NOT a bare {type, command}. Bare-form gets rejected
         # by Claude Code with "Expected array, but received undefined".
-        settings.hooks.UserPromptSubmit = [
-          {
-            matcher = "";
-            hooks = [
-              { type = "command"; command = toString stalenessHook; }
-            ];
-          }
-        ];
+        settings.hooks = {
+          UserPromptSubmit = [
+            {
+              matcher = "";
+              hooks = [
+                { type = "command"; command = toString stalenessHook; }
+              ];
+            }
+          ];
+
+          # Stop hook: at end-of-turn, force one extra agent turn
+          # to evaluate logging + distillation triggers. Loop guard
+          # is per-session (the hook script keys flag files on the
+          # Claude session_id parsed from stdin).
+          Stop = [
+            {
+              matcher = "";
+              hooks = [
+                { type = "command"; command = toString stopHook; }
+              ];
+            }
+          ];
+        };
       };
     }
   );
