@@ -78,9 +78,8 @@ DO NOT trigger after:
    from this row's `Related`. Frontmatter is the union of all
    topics in all rows of the session.
 
-7. **Update `session_end:` timestamp** in frontmatter to now
-   (RFC3339 format with timezone) on every append, so the file
-   reflects the latest activity.
+   The latest activity time is the last row's `Time` column —
+   no separate `session_end` field is needed.
 
 ## File format reference
 
@@ -88,7 +87,6 @@ DO NOT trigger after:
 ---
 date: <YYYY-MM-DD>
 session_start: <RFC3339 timestamp>
-session_end: <RFC3339 timestamp — updated on every append>
 host: <hostname>
 agent: <agent name>
 topics: [[topic-a]], [[topic-b]]
