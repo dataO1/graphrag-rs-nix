@@ -20,9 +20,8 @@ the most common failure:
    notes into the user's recorded material per the conventions in
    the plugin's CLAUDE.md "Storage conventions" section (subject-
    topic notes go alongside other reference material; dated
-   reflections go in the journal area). Upserted via
-   `mcp__memory__remember` if the same topic already has a note
-   (the server's similarity check handles dedup).
+   reflections go in the journal area). Just write the file —
+   the long-term memory layer auto-indexes it.
 2. **Catch-up log rows** — rows for meaningful actions that
    should have been logged via the `log-session-action` skill but
    weren't. Written as table rows in today's session log file
@@ -75,14 +74,18 @@ already exists:
 - Read it via the `absolutePath` field (only safe filesystem
   input from a recall result).
 - Edit it in place to integrate the new finding.
-- Pass the updated content through `mcp__memory__remember` so
-  the server's similarity check confirms the merge target.
 
 If no similar note exists:
 
 - Write a new Markdown note in the appropriate folder with
   proper frontmatter (tags, created, updated, related links).
-- Call `mcp__memory__remember` with the new note's path.
+
+In both cases the long-term memory layer auto-indexes the file
+shortly after the write (typical latency: a couple of seconds
+for embedding, longer for graph rebuild). The file is the
+artifact — there is no separate ingest step. Don't follow up
+with a recall on what you just wrote; you already know what's
+in it.
 
 ### Step 3 — Catch up missed log rows
 

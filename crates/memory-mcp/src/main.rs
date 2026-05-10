@@ -126,31 +126,19 @@ fn tool_definitions() -> Value {
                     "required": ["question"]
                 }
             },
-            {
-                "name": "remember",
-                "description": "Commit material to the user's long-term memory. Recallable within ~minute (indexing is async); no follow-up call needed.\n\nPick one body shape:\n  ✅ `path` — single file on disk\n  ✅ `paths_glob` — glob like `/abs/dir/**/*.md`\n  ✅ `paths` — explicit list of files\n  ✅ `content` + `title` — generated/pasted text\n  ❌ Don't read a file in your shell and forward it via `content` — use `path`. Ingestion reads + chunks + indexes atomically.\n\nResponse: `results[]`, per-entry `status` ∈ {ingested, duplicate, unsupported, rejected, error}. `duplicate` = content already in memory; safe to ignore.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path":       { "type": "string", "description": "Absolute path to one file." },
-                        "paths_glob": { "type": "string", "description": "Glob, e.g. `/abs/dir/**/*.md` or relative + `glob_root`." },
-                        "glob_root":  { "type": "string", "description": "Anchor for relative `paths_glob`." },
-                        "paths":      { "type": "array", "items": { "type": "string" }, "description": "Explicit list of absolute paths." },
-                        "content":    { "type": "string", "description": "Inline body. Use only for generated/pasted text." },
-                        "title":      { "type": "string", "description": "Required for `content`." },
-                        "id":         { "type": "string", "description": "Optional caller-supplied id for later `forget`." }
-                    }
-                }
-            },
-            {
-                "name": "forget",
-                "description": "Remove an entry from the user's long-term memory. Accepts either the id supplied to `remember` or the server-assigned UUID. Use sparingly — prefer asking the user before deleting personal material.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": { "id": { "type": "string" } },
-                    "required": ["id"]
-                }
-            },
+            // `remember` and `forget` are intentionally NOT advertised
+            // in this list. The Obsidian gateway plugin owns ingest +
+            // delete: the agent writes/edits/removes Markdown files in
+            // the user's recorded material via its normal Write/Edit/
+            // Bash(rm) tools, and the gateway picks up vault.on()
+            // events to propagate add/modify/delete to the index with
+            // block-level diffing. Embedding ingest is fast (1-2s) so
+            // write-then-recall in the same turn is unnecessary — the
+            // agent already knows what it just wrote.
+            //
+            // The handlers below in call_tool() are preserved so the
+            // surface can be re-exposed (one-line change here adding
+            // back the entries) if the design changes.
             {
                 "name": "status",
                 "description": "Memory health stats (entry counts, entity counts, relationship counts, vector counts) + `lastBuiltAt`. DO NOT call as a warm-up before `recall` — only call when the user explicitly asks about memory size / build state, or to disambiguate empty-memory vs no-match after a 0-hit recall.",

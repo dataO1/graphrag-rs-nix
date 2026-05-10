@@ -86,11 +86,10 @@ session log via the `log-session-action` skill format. The row's
 `Related` field can link to other knowledge docs but never to a
 log file.
 
-### Step 5 — Upsert via remember
-
-Pass the new/updated note's path to `mcp__memory__remember` so
-the server's similarity-check picks up any existing target for
-merge.
+The decision note and the log row are both Markdown files in the
+user's recorded material; the long-term memory layer auto-indexes
+them shortly after the write. The files are the artifacts — there
+is no separate ingest step.
 
 ## Quality bar
 
