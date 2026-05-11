@@ -1,7 +1,7 @@
 ---
 name: log-session-action
 description: Append a row to today's session log table BEFORE replying to the user, whenever the just-completed turn produced any of: an architectural change, a bug fix, a non-trivial documentation update (more than a sentence), a research finding, a decision taken, or an unexpected outcome that changes the user's mental model. MUST be invoked structurally — before composing the reply, ask "did this turn produce one of those?" and if yes, fire this skill first. Each meaningful turn gets its own row, even if you logged a different one earlier in the session. Single-sentence tweaks, read-only operations (recall/grep/read), and trivial chores (git status, ls) do NOT trigger.
-allowed-tools: "Bash(date *) Bash(mkdir *) Bash(ls *) Bash(test *) Read Write Edit Glob"
+allowed-tools: "Bash(date *) Bash(mkdir *) Bash(ls *) Bash(test *) Bash(printf *) Read Write Edit Glob"
 ---
 
 # log-session-action
@@ -56,8 +56,20 @@ DO NOT trigger after:
    | Time | Actions | Mutations | Why | Outcome | Related |
 
    Cell rules:
-   - `Time` — `HH:MM:SS` local time (use `Bash(date +%H:%M:%S)`).
+   - `Time` — `HH:MM:SS` local time. MUST be the output of
+     `Bash(date +%H:%M:%S)` run at this step. NEVER infer or copy
+     from context: the model has no built-in clock — without an
+     explicit `date` call, any timestamp is a guess (often
+     detectable later as a round `:00`-second value). If the
+     Stop-hook block reason that triggered this skill carries a
+     "Now: ..." timestamp, use that exact value (it was captured
+     when the hook fired and is authoritative for this turn);
+     otherwise run `date` yourself.
    - `Actions` — one-line verb-phrase summary of what was done.
+     If the action actually happened earlier in the session and
+     you're catching up, qualify the cell text (e.g. "Earlier this
+     session: …"); the `Time` column always reflects when the
+     row was written, never the historical action time.
    - `Mutations` — comma-separated list of files/configs/paths
      touched. `(none)` permitted only for design-discussion rows.
    - `Why` — one sentence: the motivation in business / technical
@@ -70,16 +82,25 @@ DO NOT trigger after:
      reference notes, READMEs). NEVER a link to another log
      file. If multiple, comma-separated.
 
-5. **Cells stay terse.** If a row would need spillover content,
+5. **Append at the END of the file.** Strictly. Use
+   `Bash(printf '| ...row... |\n' >> "$FILE")` — `>>` redirection
+   is append-only by definition and cannot insert in the middle.
+   Do NOT use `Edit` with an anchor on an earlier row; that
+   silently places the new row in the wrong position relative to
+   any rows appended by parallel agents (subagents, concurrent
+   sessions) in between. Result: rows in the file are strictly
+   chronological by `Time`, since `Time` is the row-write moment
+   and writes are append-only.
+
+6. **Cells stay terse.** If a row would need spillover content,
    split into multiple rows instead. Do NOT create a sibling log
    document and reference it.
 
-6. **Update frontmatter `topics:`** to include any new topics
-   from this row's `Related`. Frontmatter is the union of all
-   topics in all rows of the session.
-
-   The latest activity time is the last row's `Time` column —
-   no separate `session_end` field is needed.
+7. **Update frontmatter `topics:`** (via `Edit`, anchored on the
+   `topics:` line) to include any new topics from this row's
+   `Related`. Frontmatter is the union of all topics in all rows
+   of the session. The latest activity time is the last row's
+   `Time` column — no separate `session_end` field is needed.
 
 ## File format reference
 

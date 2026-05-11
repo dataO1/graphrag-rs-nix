@@ -186,8 +186,15 @@ let
     # one nudge: logging (broad bar) and distillation (high bar).
     # Most turns produce only logging; some produce both; trivial
     # turns produce neither.
+    #
+    # Inject the current wall-clock time so the agent has an
+    # authoritative timestamp for the log row's `Time` cell without
+    # needing a separate `date` call (the model has no built-in
+    # clock; round-second `:00` timestamps in past rows were the
+    # tell of inferred-from-context values).
+    NOW="$(date '+%Y-%m-%d %H:%M:%S')"
     "$JQ" -Rsc '{decision:"block",reason:.}' \
-      <<<"Structural checks before stopping."
+      <<<"Structural checks before stopping. Now: $NOW."
 
     exit 0
   '';
@@ -224,8 +231,9 @@ let
     mkdir -p "$(dirname "$SUBAGENT_BLOCKED_FLAG")"
     touch "$SUBAGENT_BLOCKED_FLAG"
 
+    NOW="$(date '+%Y-%m-%d %H:%M:%S')"
     "$JQ" -Rsc '{decision:"block",reason:.}' \
-      <<<"Subagent finished — structural checks for its work."
+      <<<"Subagent finished — structural checks for its work. Now: $NOW."
 
     exit 0
   '';
