@@ -39,21 +39,6 @@ in
       description = "Port for graphrag-server's REST API.";
     };
 
-    sessionId = lib.mkOption {
-      type = lib.types.str;
-      default = "claude-${config.home.username or "default"}";
-      defaultText = lib.literalExpression ''"claude-''${config.home.username or "default"}"'';
-      description = ''
-        Stable per-host session id. Tags every memory call so the
-        server's lease table buckets recall material under this
-        key, and the matching `/lease/check` endpoint reports which
-        leased blocks have since changed. Host-scoped on purpose:
-        Claude Code does not expose per-Claude-session ids over
-        the stdio MCP protocol, so all Claude sessions on this
-        host share one lease bucket.
-      '';
-    };
-
     sessionLogRoot = lib.mkOption {
       type = lib.types.str;
       description = ''
@@ -104,7 +89,7 @@ in
       };
 
       stalenessHook = assets.passthru.mkStalenessHook {
-        inherit (cfg) serverHost serverPort sessionId;
+        inherit (cfg) serverHost serverPort;
       };
 
       # End-of-turn nudge. Per-session loop-guard via flag file
@@ -176,7 +161,12 @@ in
           args = [ ];
           env = {
             MEMORY_BASE_URL = "http://${cfg.serverHost}:${toString cfg.serverPort}";
-            MEMORY_SESSION_ID = cfg.sessionId;
+            # MEMORY_SESSION_ID intentionally unset — was host-derived
+            # and didn't actually identify sessions. The MCP code
+            # treats empty as None and omits the field from recall
+            # bodies; server's lease tracking falls back to a global
+            # bucket. Per-Claude-session diffing happens in the
+            # staleness hook against per-session state files.
           };
         };
 

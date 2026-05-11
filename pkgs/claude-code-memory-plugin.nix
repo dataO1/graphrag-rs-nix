@@ -43,7 +43,7 @@ let
   # Covers the Obsidian gateway's debounce (~10s) plus comfort.
   selfEditWindowSecs = 60;
 
-  mkStalenessHook = { serverHost, serverPort, sessionId }:
+  mkStalenessHook = { serverHost, serverPort }:
     let
       baseUrl = "http://${serverHost}:${toString serverPort}";
     in
@@ -51,7 +51,6 @@ let
       set -uo pipefail
 
       BASE_URL='${baseUrl}'
-      MEMORY_SESSION_ID='${sessionId}'
 
       CURL='${curl}/bin/curl'
       JQ='${jq}/bin/jq'
@@ -95,11 +94,13 @@ let
         fi
       fi
 
-      # Lease bucket on the server is keyed by MEMORY_SESSION_ID
-      # (host-scoped — see modules/claude-code.nix); we don't pass
-      # the per-Claude-session id here because the MCP's lease
-      # tracking is host-scoped by design.
-      response="$("$CURL" -fsS -m 2 "$BASE_URL/lease/check?session_id=$MEMORY_SESSION_ID" 2>/dev/null || true)"
+      # No session-id is passed to /lease/check. The MCP no
+      # longer sets MEMORY_SESSION_ID (was host-derived and thus
+      # not actually identifying sessions); the server treats
+      # absence as a single global lease bucket. Per-Claude-session
+      # diffing still happens client-side against $STATE_FILE
+      # (keyed on CC_SESSION_ID parsed from hook stdin).
+      response="$("$CURL" -fsS -m 2 "$BASE_URL/lease/check" 2>/dev/null || true)"
       [ -z "$response" ] && exit 0
 
       current_stale="$(printf %s "$response" | "$JQ" -c '
