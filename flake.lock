@@ -36,11 +36,11 @@
     "graphrag-rs-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1778274661,
-        "narHash": "sha256-9Pn9cyJTBw9Ygp2XhHpkmx4ID+dDWBNkA5vlLdwYgOc=",
+        "lastModified": 1778529966,
+        "narHash": "sha256-7Vey5zNTcwP9iGyXbtB7uMK+W1ozCxaUAy7ASG4pcbk=",
         "ref": "openai-compat",
-        "rev": "cabdf78fade2be0342c2e0ece422d4e0a891d39a",
-        "revCount": 121,
+        "rev": "0f5ec6f7efbe8cf0da7d70d78362dd056ed30318",
+        "revCount": 122,
         "type": "git",
         "url": "file:///home/data01/Projects/graphrag-rs"
       },
