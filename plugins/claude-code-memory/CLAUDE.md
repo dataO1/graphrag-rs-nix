@@ -52,8 +52,16 @@ intermediate scratch?"* If YES — invoke
 distillation noise is worse than missed real insights — when in
 doubt, skip.
 
-These are independent. Most turns log only. Some turns produce
-both. Trivial turns produce neither.
+These are independent triggers — most turns log only, some
+produce both, trivial turns produce neither.
+
+**Order when both apply.** Run `consolidate-memory` FIRST, then
+`log-session-action`. The log row's `Related` column is meant to
+cite the knowledge notes that document the turn's substance — if
+logging runs first, that column can only reference pre-existing
+notes, and any note distilled from THIS turn would be unreachable
+from its own log row. Reversing the order makes the log a clean
+index into the freshly-written material.
 
 When the user says "wrap up", "save what we learned", or you
 sense the session is winding down, invoke
