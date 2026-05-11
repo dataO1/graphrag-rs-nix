@@ -8,9 +8,13 @@ allowed-tools: "Bash(date *) Bash(mkdir *) Bash(printf *) Read Edit"
 
 ## File path
 
-`~/Notes/📔 Journal/agent-log/<YYYY-MM-DD>/<host>-<agent>-<HHMM>.md`,
-one file per session. If absent, create with frontmatter + table
-header; else append.
+One file per session. Path convention is the
+"Storage conventions" section of the always-on memory guidance
+(plugin's CLAUDE.md). At time of writing it's
+keyed on date / host / agent / session start-time; the skill
+must follow whatever the guidance currently says, not duplicate
+the path here. If today's session file is absent, create with
+frontmatter + table header; else append.
 
 ## Row format
 

@@ -31,7 +31,7 @@ skip "because we already logged earlier".
 turn produce a finding / decision rationale / architectural
 insight / unexpected behavior fact that (a) a future session
 would genuinely benefit from being able to recall, (b) is NOT
-already covered in an existing vault note, (c) is NOT derivable
+already covered in an existing entry in the user's recorded material, (c) is NOT derivable
 from current code or git log, and (d) is NOT a re-statement of
 intermediate scratch?"* If YES — invoke
 `/claude-code-memory:consolidate-memory`. False-positive
@@ -58,7 +58,7 @@ automatically. The two locations the skills need:
 - **Knowledge notes**: `~/Notes/🗂️ Collection/<Title>.md`.
   Subject-topic notes (architecture, decisions, distilled findings,
   reference material). Front-matter conventions match the existing
-  vault layout — read a sibling note in the same folder before
+  layout — read a sibling note in the same folder before
   writing if unsure.
 
 The corpus location is operator-configured; if the user's
