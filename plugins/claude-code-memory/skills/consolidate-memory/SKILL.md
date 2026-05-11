@@ -21,12 +21,15 @@ the most common failure:
    as Markdown notes under the knowledge corpus per the plugin
    CLAUDE.md "Storage conventions". Just write the file — the
    memory layer auto-indexes it.
-2. **Catch-up log rows** — log-table or decisions-table rows for
-   meaningful turns that should have been logged via
-   `log-session-action` but weren't. Use exactly the same two
-   schemas (six-column log rows / seven-column decision rows) and
-   the schema-matching append rule documented in the
-   `log-session-action` skill.
+2. **Catch-up log rows** — log or decision rows for meaningful
+   turns that should have been logged at their hook nudge but
+   weren't. Call `mcp__memory__log_action` /
+   `mcp__memory__log_decision` directly (no `log-session-action`
+   skill detour); the server handles schema-matching and
+   frontmatter union the same way as for in-turn logging. The
+   row's Time column reflects the catch-up moment, not the
+   original turn's time — that's a fundamental limitation of
+   catching up after the fact.
 
 Different files. Different cadences.
 
@@ -96,10 +99,12 @@ in it.
 
 ### Step 3 — Catch up missed log rows
 
-For each meaningful unlogged action, append a row to today's
-session log following the `log-session-action` skill's format
-exactly. Multiple unlogged actions = multiple rows. Do not
-consolidate them into a single fat row.
+For each meaningful unlogged action, call
+`mcp__memory__log_action` (or `mcp__memory__log_decision` for a
+missed decision). The server stamps the row's Time at call
+arrival and resolves the file path itself. Multiple unlogged
+turns = multiple tool calls. Do not consolidate them into a
+single fat row.
 
 ### Step 4 — Update frontmatter
 

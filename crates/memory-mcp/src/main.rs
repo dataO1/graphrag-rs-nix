@@ -20,7 +20,10 @@
 // Protocol: JSON-RPC 2.0 over newline-delimited stdin/stdout, MCP
 // version 2024-11-05. Skeleton modeled on samyama-ai/graphrag-rs.
 
+mod logging;
+
 use anyhow::Result;
+use logging::{LogActionArgs, LogContext, LogDecisionArgs};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -143,12 +146,66 @@ fn tool_definitions() -> Value {
                 "name": "status",
                 "description": "Memory health stats (entry counts, entity counts, relationship counts, vector counts) + `lastBuiltAt`. DO NOT call as a warm-up before `recall` — only call when the user explicitly asks about memory size / build state, or to disambiguate empty-memory vs no-match after a 0-hit recall.",
                 "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "log_action",
+                "description": "Append a row to the active session's log file when the just-completed turn produced any of: an architectural change, a bug fix, a non-trivial doc write or edit (new file, restructured section, distilled findings — anything beyond a single-sentence tweak), a research finding, an unexpected outcome that changes the user's mental model, OR a completed user-facing deliverable (new file, code change, config edit) — INCLUDING when the deliverable was produced by a subagent you dispatched (their work counts; the log row is a SEPARATE artifact from the deliverable itself).\n\nInvoke ONLY in response to the Stop or SubagentStop hook's end-of-turn nudge. NEVER invoke proactively mid-turn — wait for the nudge. Each hook-nudged turn that meets criteria gets its own row, even if logged earlier in the session. Single-sentence tweaks, read-only operations (recall/grep/read), and trivial chores (git status, ls) do NOT trigger.\n\nThe server stamps the row's time on call arrival and resolves the log file path from cwd captured at server startup; no path or timestamp args needed. For decisions (choice between alternatives with rationale), use `log_decision` instead — decisions get their own seven-column schema.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "actions": { "type": "string", "description": "One-line verb-phrase summary of what happened this turn. For earlier-session actions, qualify in text (\"Earlier this session: …\")." },
+                        "mutations": { "type": "string", "description": "Files/configs/paths touched, comma-separated. Empty for design-discussion rows that landed no mutations." },
+                        "why": { "type": "string", "description": "One sentence: motivation in technical/business terms, not the literal task." },
+                        "outcome": { "type": "string", "description": "One phrase: what concretely landed." },
+                        "related": { "type": "array", "items": { "type": "string" }, "description": "Wiki-link targets (e.g. `My Note Title`). Server wraps each in `[[…]]` and unions into the file's frontmatter `topics:`. Empty array is fine." }
+                    },
+                    "required": ["actions", "why", "outcome"]
+                }
+            },
+            {
+                "name": "log_decision",
+                "description": "Append a Decision row to the active session's log file when the just-completed turn made a decision — a choice between alternatives with rationale + rollout + rollback. Decisions live in the log (with their temporal context), NOT as sibling knowledge notes.\n\nInvoke ONLY in response to the Stop or SubagentStop hook's end-of-turn nudge — never mid-turn. For non-decision turns (architectural change / bug fix / config edit / deliverable / etc. without a choice between options), use `log_action` instead.\n\nThe server stamps the Time column and resolves the log file path automatically; the schema-matching append rule inserts a fresh Decisions table header if the latest table in the file is a Log table (or vice versa) — alternating chronological flow comes out of that for free.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "context": { "type": "string", "description": "What problem prompted the choice. 1–2 sentences." },
+                        "options": { "type": "string", "description": "Alternatives genuinely considered. Inline format: `A: <name> — <one-line reason rejected/kept> / B: … / C: …`. Only options that were really on the table." },
+                        "decision": { "type": "string", "description": "Chosen option + one-paragraph rationale. Falsifiable reasoning, not \"because it's better\"." },
+                        "rollout": { "type": "string", "description": "Concrete steps the decision triggers. Use \"N/A — <reason>\" when nothing to roll out." },
+                        "rollback": { "type": "string", "description": "Concrete reverse steps if the decision turns out wrong. Use \"N/A — <reason>\" when truly inapplicable." },
+                        "related": { "type": "array", "items": { "type": "string" }, "description": "Wiki-link targets. Server wraps in `[[…]]` and unions into frontmatter." }
+                    },
+                    "required": ["context", "options", "decision"]
+                }
             }
         ]
     })
 }
 
-async fn call_tool(client: &Client, cfg: &Config, name: &str, args: &Value) -> Result<Value> {
+async fn call_tool(
+    client: &Client,
+    cfg: &Config,
+    log_ctx: Option<&LogContext>,
+    name: &str,
+    args: &Value,
+) -> Result<Value> {
+    // log_action / log_decision are local file-IO tools — they don't
+    // talk to graphrag-server. Short-circuit here BEFORE the REST
+    // dispatch so the http client/timeout doesn't enter the path.
+    match name {
+        "log_action" => {
+            let parsed: LogActionArgs = serde_json::from_value(args.clone())
+                .map_err(|e| anyhow::anyhow!("invalid_field: {e}"))?;
+            return logging::handle_log_action(log_ctx, parsed).await;
+        }
+        "log_decision" => {
+            let parsed: LogDecisionArgs = serde_json::from_value(args.clone())
+                .map_err(|e| anyhow::anyhow!("invalid_field: {e}"))?;
+            return logging::handle_log_decision(log_ctx, parsed).await;
+        }
+        _ => {}
+    }
+
     let base = &cfg.base_url;
     let resp_value = match name {
         "recall" => {
@@ -313,7 +370,12 @@ fn build_recall_preamble(resp: &Value) -> String {
     out
 }
 
-async fn handle(req: JsonRpcRequest, client: &Client, cfg: &Config) -> Option<JsonRpcResponse> {
+async fn handle(
+    req: JsonRpcRequest,
+    client: &Client,
+    cfg: &Config,
+    log_ctx: Option<&LogContext>,
+) -> Option<JsonRpcResponse> {
     if req.jsonrpc != "2.0" {
         return req.id.map(|id| err(id, -32600, "invalid jsonrpc version"));
     }
@@ -330,7 +392,7 @@ async fn handle(req: JsonRpcRequest, client: &Client, cfg: &Config) -> Option<Js
         "tools/call" => {
             let name = req.params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = req.params.get("arguments").cloned().unwrap_or(json!({}));
-            match call_tool(client, cfg, name, &args).await {
+            match call_tool(client, cfg, log_ctx, name, &args).await {
                 Ok(v) => Some(ok(id, v)),
                 Err(e) => Some(ok(id, json!({
                     "content": [{ "type": "text", "text": format!("error: {e:#}") }],
@@ -353,6 +415,28 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = Config::from_env();
+    let log_ctx = match LogContext::from_env_and_cwd() {
+        Ok(Some(ctx)) => {
+            tracing::info!(
+                log_root = %ctx.session_log_root.display(),
+                host = %ctx.host,
+                project = %ctx.project,
+                session_start = %ctx.session_start_hhmmss,
+                "log_action / log_decision enabled",
+            );
+            Some(ctx)
+        }
+        Ok(None) => {
+            tracing::warn!(
+                "MEMORY_SESSION_LOG_ROOT not set — log_action / log_decision will refuse with `logging_disabled`. recall / status unaffected."
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(err = ?e, "could not derive LogContext — log_action / log_decision will refuse");
+            None
+        }
+    };
     tracing::info!(base_url = %cfg.base_url, "memory-mcp starting");
 
     let client = Client::builder()
@@ -376,7 +460,7 @@ async fn main() -> Result<()> {
         }
 
         let response = match serde_json::from_str::<JsonRpcRequest>(trimmed) {
-            Ok(req) => handle(req, &client, &cfg).await,
+            Ok(req) => handle(req, &client, &cfg, log_ctx.as_ref()).await,
             Err(e) => Some(err(Value::Null, -32700, format!("parse error: {e}"))),
         };
 

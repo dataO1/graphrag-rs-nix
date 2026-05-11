@@ -160,6 +160,12 @@ in
           args = [ ];
           env = {
             MEMORY_BASE_URL = "http://${cfg.serverHost}:${toString cfg.serverPort}";
+            # `log_action` / `log_decision` write into this dir using
+            # cwd-derived project + startup-time hostname/HHMMSS to
+            # build the per-session filename. Same path the
+            # postuse-tracker hook watches for cross-session staleness
+            # suppression.
+            MEMORY_SESSION_LOG_ROOT = cfg.sessionLogRoot;
             # MEMORY_SESSION_ID intentionally unset — was host-derived
             # and didn't actually identify sessions. The MCP code
             # treats empty as None and omits the field from recall

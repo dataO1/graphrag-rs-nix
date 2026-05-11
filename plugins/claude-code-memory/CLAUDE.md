@@ -21,21 +21,30 @@ use the `/claude-code-memory:recall-and-think` skill instead of
 stitching ad-hoc recalls.
 
 **Logging structural check.** When the Stop or SubagentStop hook
-fires its end-of-turn nudge (look for `Now: <timestamp>` in the
-hook output), ask: *"Did this turn produce an architectural
-change, a bug fix, a non-trivial documentation write or edit
-(new file, restructured section, distilled findings — anything
-beyond a single-sentence tweak), a research finding, a decision
-taken, an unexpected outcome that changes the user's mental
-model, OR did I (or a subagent I dispatched) complete a
-user-facing deliverable (new file, code change, config edit)?"*
-If YES — invoke `/claude-code-memory:log-session-action` BEFORE
-replying. Do NOT invoke proactively mid-turn — wait for the
-nudge; the hook-injected `Now:` is what stamps the row. Each
-hook-nudged turn gets its own row; don't batch or skip "because
-we already logged earlier" or "because the deliverable IS the
-artifact" — the log row is a SEPARATE artifact recording that
-the deliverable landed.
+fires its end-of-turn nudge, ask: *"Did this turn produce an
+architectural change, a bug fix, a non-trivial documentation
+write or edit (new file, restructured section, distilled
+findings — anything beyond a single-sentence tweak), a research
+finding, a decision taken, an unexpected outcome that changes the
+user's mental model, OR did I (or a subagent I dispatched)
+complete a user-facing deliverable (new file, code change, config
+edit)?"* If YES — call the matching MCP tool BEFORE replying:
+
+- `mcp__memory__log_action` for action / change / deliverable /
+  finding rows
+- `mcp__memory__log_decision` for decision rows (choice between
+  alternatives with rationale)
+
+If the turn produced both, fire both tools — one row each in the
+log file. The server handles file path, time stamping, schema-
+matching append, and frontmatter union; the caller just supplies
+the row body fields.
+
+Do NOT invoke proactively mid-turn — wait for the hook nudge.
+Each hook-nudged turn that meets the criteria gets its own
+row(s); don't batch or skip "because we already logged earlier"
+or "because the deliverable IS the artifact" — log rows are a
+SEPARATE artifact recording that the deliverable landed.
 
 If you dispatched subagents this turn, their work counts toward
 the check. Their summaries are in your context — include them
@@ -69,9 +78,9 @@ content (research findings, architectural insights, behavior
 facts the user will want to recall by topic rather than by date).
 
 **Order when both apply.** Run `consolidate-memory` FIRST, then
-`log-session-action`. The log row's `Related` column is meant to
+the matching MCP log tool. The row's `related[]` arg is meant to
 cite knowledge notes that document the turn's substance — if
-logging runs first, that column can only reference pre-existing
+logging runs first, that arg can only reference pre-existing
 notes, and any note distilled from THIS turn would be unreachable
 from its own log row. (Note: for turns whose only durable output
 IS a decision, no `consolidate-memory` call is needed — the
@@ -110,12 +119,12 @@ automatically. The two locations the skills need:
   | Time | Context | Options | Decision | Rollout | Rollback | Related |
   ```
 
-  When appending, match the schema of the latest table in the
-  file. If the new entry's type doesn't match, start a new table
-  with the right header and append the entry there. Result is an
-  alternating chronological flow of log / decision / log /
-  decision blocks. Never split a row's content into a sibling
-  document — append a new table inline instead.
+  Writes go through `mcp__memory__log_action` and
+  `mcp__memory__log_decision` — server-side schema-matching
+  inserts a fresh header inline when the latest table doesn't
+  match the row's schema. Result is an alternating chronological
+  flow of log / decision / log / decision blocks. Never split a
+  row's content into a sibling document.
 
 - **Knowledge notes**: `@knowledgeRoot@/<Title>.md`.
   Subject-topic notes for non-decision content: research
