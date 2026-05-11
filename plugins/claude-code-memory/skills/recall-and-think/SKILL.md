@@ -29,60 +29,82 @@ changed in X").
 
 ## Procedure (IRCoT-style interleaved retrieval)
 
-1. **First recall** — `mode: thorough`, query is the user's
-   question rephrased as a search-friendly statement. If multiple
-   distinct topics are involved, fire multiple recall calls in
-   parallel (one per topic).
+1. **Plan the recall fan-out.** Enumerate every distinct angle
+   the question touches:
+   - **Topics / entities** (project names, concepts, components)
+   - **Techniques / approaches** (algorithms, patterns, tools)
+   - **Temporal axes** (state-of, history-of, latest-move,
+     since-when, what-changed)
+   
+   The recalls below run in parallel — fire all of them in a
+   single response. Recall is wait-free server-side; serialising
+   independent angles wastes wall-clock time. Only serialise
+   when one recall's result names the next recall's seed (e.g.
+   "X depends on Y" → then recall Y).
 
-2. **Read the results.** The chunk IS the answer. Do not follow
+2. **For each angle, dual recall by default — knowledge AND
+   timeline.** Two recalls per angle, in parallel:
+   - **Knowledge recall** — `mode: thorough`, the user's
+     question as the query. Returns durable findings, decisions,
+     project models from `🗂️ Collection/` and similar. This is
+     "what's known".
+   - **Timeline recall** — same `mode: thorough`, query phrased
+     to capture activity ("recent activity on X", "what happened
+     with Y"), `max_versions_per_doc: 5`. Filter / weight
+     results from `📔 Journal/agent-log/...` — those are
+     chronological session rows. Order by `lastModified` desc.
+     This is "what's been done, when, where the trail stops".
+   
+   Always do BOTH. The agent rarely knows in advance whether
+   prior session work touched the topic — assume yes until the
+   timeline pass returns empty. If the question is narrow and
+   the user clearly only wants stable facts, the timeline pass
+   is cheap (zero-hit returns fast); the cost of always-fan-out
+   is much lower than the cost of missing "we already covered
+   this last week, here's where we left off".
+
+3. **Read the results.** The chunk IS the answer. Do not follow
    up with `read` / `cat` / `find` against the source URI — the
    `excerpt` field carries what you need. Only fall back to
    filesystem reads via the result's `absolutePath` field
    (verbatim, never reconstructed) when the user explicitly
-   asked for the *full* document.
+   asked for the *full* document. Distinguish chunks by `source`
+   path: `🗂️ Collection/` = knowledge; `📔 Journal/agent-log/` =
+   activity timeline; anything else = adjacent corpus material.
 
-3. **Identify unsupported sub-claims.** For each piece of the
-   answer you would write, ask: *"Can I point to a specific
+4. **Identify unsupported sub-claims AND gaps.** For each piece
+   of the answer you would write, ask: *"Can I point to a specific
    passage in the recall results that supports this?"* If no →
-   that sub-claim is unsupported.
+   unsupported. Also: scan the timeline rows for **gaps** —
+   claims mentioned but not yet investigated, hypotheses raised
+   but not resolved, decisions deferred. Surface those
+   explicitly; they ARE the value-add for "state of X" prompts.
 
-4. **Recall again, tighter.** For each unsupported sub-claim,
-   issue a fresh recall with a tighter query targeting that
-   specific gap. Do NOT synthesise across the gap with general
+5. **Recall again, tighter.** For each unsupported sub-claim or
+   gap worth probing, issue a fresh recall with a tighter query.
+   Independent gaps → parallel recalls (same fan-out rule as
+   step 1). Do NOT synthesise across the gap with general
    knowledge. If the second recall also returns nothing
    relevant, report the gap to the user — do not invent.
 
-5. **Resolve conflicts by recency.** When recall results
+6. **Resolve conflicts by recency.** When recall results
    disagree, prefer the entry with the most recent
    `lastModified`; treat older entries as superseded. Older-but-
-   not-removed entries are stale, not "conflicting".
+   not-removed entries are stale, not "conflicting". For
+   diff-style questions ("what changed in X"), use
+   `max_versions_per_doc ≥ 5` and `as_of` to anchor the "before"
+   snapshot; compose as structured diff (added / removed /
+   changed) with explicit version references.
 
-6. **Compose the answer with citations.** Each non-trivial
-   claim links to the supporting recall result by `source` (a
-   citation URI for provenance — do NOT pass to a shell tool).
-
-## When to fan out vs serialise
-
-- **Fan out** when the user's question covers multiple distinct
-  topics. Recall is wait-free server-side; serialising
-  independent topics wastes wall-clock time.
-- **Serialise** when each recall depends on the previous (e.g.
-  recall returns an entity name → next recall queries that
-  entity).
+7. **Compose the answer with citations + state report.** Each
+   non-trivial claim links to the supporting recall result by
+   `source` (a citation URI for provenance — do NOT pass to a
+   shell tool). For state-of-work questions, structure the
+   answer: "Known: … | Last moves: … | Open gaps: …".
 
 If a single recall returns 0 hits, do NOT auto-fan-out to 5
-paraphrases. Try ONE rephrasing or `mode: thorough`; if still
+paraphrases. Try ONE rephrasing or a different mode; if still
 nothing, report the gap.
-
-## Diff-style questions
-
-For "what changed in X", "diff Y over time", or "history of Z":
-
-- `mode: thorough`, `max_versions_per_doc: 5` (or higher).
-- Use `as_of` to anchor the "before" snapshot if asked for a
-  bounded comparison.
-- Compose the answer as a structured diff (added / removed /
-  changed) with explicit version references.
 
 ## Quality bar
 
