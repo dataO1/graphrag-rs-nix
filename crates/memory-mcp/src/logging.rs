@@ -414,7 +414,7 @@ async fn union_frontmatter_topics(path: &Path, related: &[String]) -> Result<()>
     let mut existing: Vec<String> = Vec::new();
     if let Some(i) = topics_idx {
         // Parse `topics: [[a]], [[b]], ...`.
-        let after_colon = lines[i].splitn(2, ':').nth(1).unwrap_or("").trim();
+        let after_colon = lines[i].split_once(':').map(|x| x.1).unwrap_or("").trim();
         for piece in after_colon.split(',') {
             let p = piece.trim().to_string();
             if !p.is_empty() {
