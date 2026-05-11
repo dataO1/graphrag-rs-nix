@@ -20,12 +20,21 @@ ad-hoc recalls.
 
 **Logging structural check.** Before replying after a meaningful
 unit of work, ask: *"Did this turn produce an architectural
-change, a bug fix, a non-trivial documentation update (more than
-a sentence), a research finding, a decision taken, or an
-unexpected outcome that changes the user's mental model?"* If
-YES — invoke `/claude-code-memory:log-session-action` BEFORE
+change, a bug fix, a non-trivial documentation write or edit
+(new file, restructured section, distilled findings — anything
+beyond a single-sentence tweak), a research finding, a decision
+taken, an unexpected outcome that changes the user's mental
+model, OR did I (or a subagent I dispatched) complete a
+user-facing deliverable (new file, code change, config edit)?"*
+If YES — invoke `/claude-code-memory:log-session-action` BEFORE
 replying. Each meaningful turn gets its own row; don't batch or
-skip "because we already logged earlier".
+skip "because we already logged earlier" or "because the
+deliverable IS the artifact" — the log row is a SEPARATE
+artifact recording that the deliverable landed.
+
+If you dispatched subagents this turn, their work counts toward
+the check. Their summaries are in your context — include them
+when deciding what to log.
 
 **Distillation structural check.** Higher bar. Ask: *"Did this
 turn produce a finding / decision rationale / architectural
