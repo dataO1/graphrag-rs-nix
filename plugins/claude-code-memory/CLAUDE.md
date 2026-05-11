@@ -52,9 +52,13 @@ Both skills above write Markdown files into the user's knowledge
 corpus, which the long-term memory backend re-indexes
 automatically. The two locations the skills need:
 
-- **Session logs**: `@sessionLogRoot@/<YYYY-MM-DD>/<host>-<agent>-<HHMM>.md`.
-  One file per session; per-row table format. Append-only within a
-  session; never split a row's content into a sibling document.
+- **Session logs**: `@sessionLogRoot@/<YYYY-MM-DD>/<host>-<agent>-<project>-<HHMMSS>.md`,
+  where `<project>` = `basename` of the session's working
+  directory (groups logs per-project; sessions in different
+  projects produce different files; subagents inherit the parent's
+  cwd so their rows land in the parent's project log). One file
+  per session; per-row table format. Append-only within a session;
+  never split a row's content into a sibling document.
 - **Knowledge notes**: `@knowledgeRoot@/<Title>.md`.
   Subject-topic notes (architecture, decisions, distilled findings,
   reference material). Front-matter conventions match the existing

@@ -8,13 +8,18 @@ allowed-tools: "Bash(date *) Bash(mkdir *) Bash(printf *) Read Edit"
 
 ## File path
 
-One file per session. Path convention is the
-"Storage conventions" section of the always-on memory guidance
-(plugin's CLAUDE.md). At time of writing it's
-keyed on date / host / agent / session start-time; the skill
-must follow whatever the guidance currently says, not duplicate
-the path here. If today's session file is absent, create with
-frontmatter + table header; else append.
+One file per session, grouped by project. Follow the "Storage
+conventions" section of the always-on memory guidance (plugin's
+CLAUDE.md) — do not hard-code the path here. At time of writing
+the filename includes `basename` of the session's cwd
+(`Bash(basename "$PWD")` or `Bash(basename "$(pwd)")`), so
+sessions in different projects produce different files.
+
+On first write of a session: glob for an existing file matching
+this session's cwd+date (the agent's first row might be a
+continuation of an earlier same-day session in the same project,
+in which case append; otherwise create fresh with frontmatter +
+table header).
 
 ## Row format
 
