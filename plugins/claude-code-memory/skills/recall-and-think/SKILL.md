@@ -44,33 +44,38 @@ changed in X").
 
 2. **For each angle, dual recall by default — knowledge AND
    timeline.** Two recalls per angle, in parallel:
-   - **Knowledge recall** — `mode: thorough`, the user's
-     question as the query. Returns durable findings, decisions,
-     project models from `🗂️ Collection/` and similar. This is
-     "what's known".
-   - **Timeline recall** — same `mode: thorough`, query phrased
-     to capture activity ("recent activity on X", "what happened
-     with Y"), `max_versions_per_doc: 5`. Filter / weight
-     results from `📔 Journal/agent-log/...` — those are
-     chronological session rows. Order by `lastModified` desc.
-     This is "what's been done, when, where the trail stops".
-   
-   Always do BOTH. The agent rarely knows in advance whether
-   prior session work touched the topic — assume yes until the
-   timeline pass returns empty. If the question is narrow and
-   the user clearly only wants stable facts, the timeline pass
-   is cheap (zero-hit returns fast); the cost of always-fan-out
-   is much lower than the cost of missing "we already covered
-   this last week, here's where we left off".
+   - **Knowledge recall** — the user's question as the query.
+     Returns durable findings, decisions, project models, concept
+     notes. This is "what's known".
+   - **Timeline recall** — query phrased to capture activity
+     ("recent activity on X", "what happened with Y", "where did
+     we leave off on Z"), `max_versions_per_doc: 5`. Order by
+     `lastModified` desc. This surfaces chronological/session
+     entries — "what's been done, when, where the trail stops".
+
+   Pick the `mode` per angle (see Mode selection above) — match
+   the question shape, don't default to thorough. Knowledge
+   recalls often benefit from `thorough` or `local`; timeline
+   recalls usually do fine on `default` or `simple` since the
+   relevance signal is recency, not synthesis.
+
+   Always do BOTH passes. The agent rarely knows in advance
+   whether prior session work touched the topic — assume yes
+   until the timeline pass returns empty. Zero-hit recalls are
+   cheap; the cost of always-fan-out is much lower than the
+   cost of missing "we already covered this; here's where we
+   left off".
 
 3. **Read the results.** The chunk IS the answer. Do not follow
    up with `read` / `cat` / `find` against the source URI — the
    `excerpt` field carries what you need. Only fall back to
    filesystem reads via the result's `absolutePath` field
    (verbatim, never reconstructed) when the user explicitly
-   asked for the *full* document. Distinguish chunks by `source`
-   path: `🗂️ Collection/` = knowledge; `📔 Journal/agent-log/` =
-   activity timeline; anything else = adjacent corpus material.
+   asked for the *full* document. Distinguish chunks by content
+   shape, not by hard-coded paths: tabular rows with explicit
+   timestamps / agents / per-row mutations = activity timeline;
+   prose with a thesis = durable knowledge; everything else =
+   adjacent corpus material.
 
 4. **Identify unsupported sub-claims AND gaps.** For each piece
    of the answer you would write, ask: *"Can I point to a specific
