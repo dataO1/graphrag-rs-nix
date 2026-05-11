@@ -6,9 +6,9 @@ Contains:
 - **Skills** (`skills/`):
   - `consolidate-memory` — distil findings + catch up missed log
     rows.
-  - `recall-and-think` — multi-hop deep recall. User-invoked.
-  - `document-decision` — capture a decision with alternatives,
-    rationale, rollout/rollback. Auto-invoked on user choices.
+  - `recall-and-think` — multi-hop deep recall. Auto-invoked
+    for synthesis questions and for context gathering before
+    complex tasks.
   - `log-session-action` — append a row to today's session log
     after a meaningful unit of work. Auto-invoked.
 - **CLAUDE.md** — compressed always-on guidance (~15 lines after

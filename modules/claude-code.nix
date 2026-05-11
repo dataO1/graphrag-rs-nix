@@ -25,7 +25,7 @@ let
 in
 {
   options.programs.claude-code-memory = {
-    enable = lib.mkEnableOption "Long-term memory feature for Claude Code (recall / remember / forget / status MCP, session-log skill, multi-hop recall skill, decision-capture skill, staleness-check hook)";
+    enable = lib.mkEnableOption "Long-term memory feature for Claude Code (recall / remember / forget / status MCP, session-log skill, multi-hop recall skill, staleness-check hook)";
 
     serverHost = lib.mkOption {
       type = lib.types.str;
@@ -148,7 +148,6 @@ in
         [
           "consolidate-memory"
           "recall-and-think"
-          "document-decision"
           "log-session-action"
         ]);
 

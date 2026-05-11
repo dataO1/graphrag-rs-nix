@@ -1,15 +1,15 @@
 ---
 name: recall-and-think
-description: Deep multi-hop lookup against long-term memory. Use when a question requires synthesis across multiple recorded sources, when a single recall left sub-claims unsupported, when the user asks "what changed in X" or diff-style questions, or when answering needs both broad and narrow recall passes. NOT for routine "look up X" questions — those should use mcp__memory__recall directly.
-disable-model-invocation: true
+description: Deep multi-hop lookup against long-term memory. Use when synthesis across multiple recorded sources is needed — either to answer a question OR to gather context up front before a complex task (designing, implementing, refactoring, or debugging something the user has prior notes on). Also use for diff-style questions ("what changed in X"), when a single recall left sub-claims unsupported, or when answering needs both broad and narrow recall passes. NOT for routine "look up X" questions — those should use mcp__memory__recall directly.
 allowed-tools: "Read Glob Grep"
 ---
 
 # recall-and-think
 
-Multi-hop deep recall. User-invoked. Replaces ad-hoc stitching
-of recall calls when the answer needs synthesis or the first
-recall returned partial coverage.
+Multi-hop deep recall. Replaces ad-hoc stitching of recall
+calls when the answer needs synthesis, the first recall
+returned partial coverage, or a complex task needs prior
+context gathered before starting.
 
 ## Mode selection
 

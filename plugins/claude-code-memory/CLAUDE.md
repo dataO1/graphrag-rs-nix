@@ -13,10 +13,12 @@ question that depends on user-specific context, ask: *"Can I point
 to the exact passage in THIS conversation that supports my answer?"*
 If no — recall. Not a confidence check, a structural check.
 
-For deep multi-hop lookups, "what changed" diffs, or research-style
-synthesis across multiple recorded sources, use the
-`/claude-code-memory:recall-and-think` skill instead of stitching
-ad-hoc recalls.
+For deep multi-hop lookups, "what changed" diffs, research-style
+synthesis across multiple recorded sources, or **before starting a
+complex task that needs prior context** (designing, implementing,
+refactoring, or debugging something the user has prior notes on),
+use the `/claude-code-memory:recall-and-think` skill instead of
+stitching ad-hoc recalls.
 
 **Logging structural check.** Before replying after a meaningful
 unit of work, ask: *"Did this turn produce an architectural
