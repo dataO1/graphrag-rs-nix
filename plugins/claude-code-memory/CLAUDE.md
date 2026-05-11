@@ -91,6 +91,16 @@ sense the session is winding down, invoke
 `/claude-code-memory:consolidate-memory` to distil non-decision
 findings and catch up on missed log rows.
 
+**Grilling UX — prefer `AskUserQuestion` for bounded options.**
+When you're grilling the user (organically or via the `grill-me`
+skill) and the next question has a bounded answer space (≤4
+distinct paths), present it via the `AskUserQuestion` tool rather
+than free-form text. Typing free-form answers is higher friction
+than picking from a list. Free-form prompts are for genuinely
+open questions only ("describe what's not working", "what's your
+goal here"). For "should we use X, Y, or Z?" or "is this scope
+right, too wide, or too narrow?" — use `AskUserQuestion`.
+
 ## Storage conventions
 
 Both skills above write Markdown files into the user's knowledge
