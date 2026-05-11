@@ -52,17 +52,11 @@ Both skills above write Markdown files into the user's knowledge
 corpus, which the long-term memory backend re-indexes
 automatically. The two locations the skills need:
 
-- **Session logs**: `~/Notes/📔 Journal/agent-log/<YYYY-MM-DD>/<host>-<agent>-<HHMM>.md`.
+- **Session logs**: `@sessionLogRoot@/<YYYY-MM-DD>/<host>-<agent>-<HHMM>.md`.
   One file per session; per-row table format. Append-only within a
   session; never split a row's content into a sibling document.
-- **Knowledge notes**: `~/Notes/🗂️ Collection/<Title>.md`.
+- **Knowledge notes**: `@knowledgeRoot@/<Title>.md`.
   Subject-topic notes (architecture, decisions, distilled findings,
   reference material). Front-matter conventions match the existing
-  layout — read a sibling note in the same folder before
-  writing if unsure.
-
-The corpus location is operator-configured; if the user's
-filesystem layout differs from above, update this section in
-the host's plugin and the skills will pick up the new paths.
-The skills themselves do not hard-code paths — they reference
-the conventions established here.
+  layout — read a sibling note in the same folder before writing
+  if unsure.

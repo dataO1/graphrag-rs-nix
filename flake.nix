@@ -75,12 +75,16 @@
           inherit craneLib;
         };
 
-        # Default-args build of the Claude Code memory plugin — useful
-        # for `nix build .#claude-code-memory-plugin` smoke tests. Hosts
-        # that consume this via the home-manager module override host /
-        # port / sessionId per-deployment.
+        # Smoke-test build of the Claude Code memory plugin — useful
+        # for `nix build .#claude-code-memory-plugin` checks. Real
+        # consumers go through the home-manager module which threads
+        # operator-set paths in. The sessionLogRoot/knowledgeRoot
+        # values here are placeholders so the build succeeds; do NOT
+        # use this output directly on a host.
         claude-code-memory-plugin = pkgs.callPackage ./pkgs/claude-code-memory-plugin.nix {
           inherit memory-mcp;
+          sessionLogRoot = "/SET-VIA-HOME-MANAGER/session-log";
+          knowledgeRoot = "/SET-VIA-HOME-MANAGER/knowledge";
         };
       in
       {

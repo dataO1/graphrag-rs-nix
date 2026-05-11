@@ -54,18 +54,35 @@ in
       '';
     };
 
-    vaultRoot = lib.mkOption {
+    sessionLogRoot = lib.mkOption {
       type = lib.types.str;
-      default = "${config.home.homeDirectory}/Notes";
-      defaultText = lib.literalExpression ''"''${config.home.homeDirectory}/Notes"'';
       description = ''
-        Absolute path to the user's knowledge corpus root. Used by
-        the PostToolUse edit-tracker hook to decide whether a
-        Write/Edit/MultiEdit on a given path counts as a self-edit
-        for staleness suppression. Should match the Obsidian
-        gateway's vault path and the server's
-        `services.graphrag-rs.ingest.allowedRoots`.
+        Absolute path to the directory under which session log
+        files are written
+        (`<sessionLogRoot>/<YYYY-MM-DD>/<host>-<agent>-<HHMM>.md`).
+        Required — no default; operator must point this at a
+        location their knowledge corpus / Obsidian vault sees
+        so the long-term memory layer auto-indexes the logs.
+        Substituted into the plugin's CLAUDE.md at build time and
+        used by the PostToolUse edit-tracker to decide whether a
+        write should suppress staleness alerts.
       '';
+      example = lib.literalExpression ''"''${config.home.homeDirectory}/Notes/📔 Journal/agent-log"'';
+    };
+
+    knowledgeRoot = lib.mkOption {
+      type = lib.types.str;
+      description = ''
+        Absolute path to the directory under which durable
+        knowledge notes (distilled findings, decisions,
+        architecture notes) are written. Required — no default;
+        operator must point this at a location their knowledge
+        corpus / Obsidian vault sees so the long-term memory
+        layer auto-indexes the notes. Substituted into the
+        plugin's CLAUDE.md at build time and used by the
+        PostToolUse edit-tracker.
+      '';
+      example = lib.literalExpression ''"''${config.home.homeDirectory}/Notes/🗂️ Collection"'';
     };
   };
 
@@ -74,8 +91,17 @@ in
       system = pkgs.stdenv.hostPlatform.system;
       flakePkgs = self.packages.${system};
 
-      assets = flakePkgs.claude-code-memory-plugin;
       memory-mcp = flakePkgs.memory-mcp;
+
+      # Build the plugin asset bundle with operator-configured paths
+      # substituted in. Re-built per-host (not reusing
+      # flakePkgs.claude-code-memory-plugin) because CLAUDE.md
+      # placeholders and the postuse-tracker shell script bake the
+      # paths at build time.
+      assets = pkgs.callPackage (self + "/pkgs/claude-code-memory-plugin.nix") {
+        inherit memory-mcp;
+        inherit (cfg) sessionLogRoot knowledgeRoot;
+      };
 
       stalenessHook = assets.passthru.mkStalenessHook {
         inherit (cfg) serverHost serverPort sessionId;
@@ -93,12 +119,10 @@ in
       subagentStopHook = assets.passthru.mkSubagentStopHook;
 
       # PostToolUse edit tracker. Touches a per-session sentinel
-      # when the agent writes/edits a file under the vault root,
-      # so the staleness hook can suppress alerts that are
+      # when the agent writes/edits a file under either configured
+      # root, so the staleness hook can suppress alerts that are
       # almost-certainly self-caused.
-      postuseEditTracker = assets.passthru.mkPostuseEditTracker {
-        inherit (cfg) vaultRoot;
-      };
+      postuseEditTracker = assets.passthru.mkPostuseEditTracker;
     in
     {
       assertions = [

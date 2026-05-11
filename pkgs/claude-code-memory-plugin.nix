@@ -4,6 +4,12 @@
 , curl
 , jq
 , memory-mcp
+  # Required: absolute paths the agent writes to. Substituted
+  # into CLAUDE.md at build time. The home-manager module
+  # (programs.claude-code-memory.{sessionLogRoot,knowledgeRoot})
+  # threads these from operator-set values.
+, sessionLogRoot
+, knowledgeRoot
 }:
 
 # Static plugin asset bundle: skills + CLAUDE.md + staleness-check
@@ -240,35 +246,36 @@ let
 
   # PostToolUse hook for Write/Edit/MultiEdit. Touches a
   # per-Claude-session sentinel file when the touched path is
-  # under the vault root. The staleness hook checks the
-  # sentinel's mtime and suppresses staleness alerts within
-  # `selfEditWindowSecs` after a self-edit (the agent caused
-  # the staleness, no point re-alerting it).
+  # under either of the operator-configured roots (sessionLogRoot
+  # or knowledgeRoot). The staleness hook checks the sentinel's
+  # mtime and suppresses staleness alerts within `selfEditWindowSecs`
+  # after a self-edit (the agent caused the staleness, no point
+  # re-alerting it).
   #
   # Wired with matcher "Write|Edit|MultiEdit" in
   # programs.claude-code.settings.hooks.PostToolUse.
-  mkPostuseEditTracker = { vaultRoot }:
-    writeShellScript "claude-memory-postuse-edit-tracker" ''
-      set -uo pipefail
+  mkPostuseEditTracker = writeShellScript "claude-memory-postuse-edit-tracker" ''
+    set -uo pipefail
 
-      JQ='${jq}/bin/jq'
+    JQ='${jq}/bin/jq'
 
-      PAYLOAD="$(cat 2>/dev/null || echo '{}')"
-      CC_SESSION_ID="$(printf %s "$PAYLOAD" | "$JQ" -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")"
-      TOUCHED="$(printf %s "$PAYLOAD" | "$JQ" -r '.tool_input.file_path // empty' 2>/dev/null || echo "")"
+    PAYLOAD="$(cat 2>/dev/null || echo '{}')"
+    CC_SESSION_ID="$(printf %s "$PAYLOAD" | "$JQ" -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")"
+    TOUCHED="$(printf %s "$PAYLOAD" | "$JQ" -r '.tool_input.file_path // empty' 2>/dev/null || echo "")"
 
-      # Only record vault-root writes; other writes (e.g. dotfiles
-      # repo, /tmp) shouldn't suppress staleness for vault-leased
-      # blocks.
-      case "$TOUCHED" in
-        ${vaultRoot}/*)
-          mkdir -p "''${HOME}/.claude"
-          : > "''${HOME}/.claude/recent-self-vault-edit-''${CC_SESSION_ID}"
-          ;;
-      esac
+    # Only record writes under the operator-configured roots
+    # (sessionLogRoot, knowledgeRoot); other writes (e.g. dotfiles
+    # repo, /tmp) shouldn't suppress staleness for memory-leased
+    # blocks.
+    case "$TOUCHED" in
+      ${sessionLogRoot}/*|${knowledgeRoot}/*)
+        mkdir -p "''${HOME}/.claude"
+        : > "''${HOME}/.claude/recent-self-vault-edit-''${CC_SESSION_ID}"
+        ;;
+    esac
 
-      exit 0
-    '';
+    exit 0
+  '';
 in
 runCommand "claude-code-memory-assets"
 {
@@ -283,7 +290,14 @@ runCommand "claude-code-memory-assets"
   };
 } ''
   mkdir -p "$out"
-  cp ${src}/CLAUDE.md "$out/CLAUDE.md"
+  # Substitute operator-configured paths into CLAUDE.md at build
+  # time. Placeholders @sessionLogRoot@ and @knowledgeRoot@ in the
+  # source are replaced with the values the home-manager module
+  # passes in.
+  sed \
+    -e 's|@sessionLogRoot@|${sessionLogRoot}|g' \
+    -e 's|@knowledgeRoot@|${knowledgeRoot}|g' \
+    ${src}/CLAUDE.md > "$out/CLAUDE.md"
   cp ${src}/README.md "$out/README.md"
   cp -r ${src}/skills "$out/skills"
 ''
