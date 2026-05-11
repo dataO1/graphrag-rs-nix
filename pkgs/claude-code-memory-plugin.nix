@@ -268,8 +268,12 @@ let
     # (sessionLogRoot, knowledgeRoot); other writes (e.g. dotfiles
     # repo, /tmp) shouldn't suppress staleness for memory-leased
     # blocks.
+    # Quote the literal-path part of each pattern (Nix substitutes
+    # the path strings, which may contain spaces / emoji — without
+    # quotes bash tokenizes on the spaces and the case fails to
+    # parse). The trailing `*` stays unquoted so glob matching works.
     case "$TOUCHED" in
-      ${sessionLogRoot}/*|${knowledgeRoot}/*)
+      "${sessionLogRoot}/"*|"${knowledgeRoot}/"*)
         mkdir -p "''${HOME}/.claude"
         : > "''${HOME}/.claude/recent-self-vault-edit-''${CC_SESSION_ID}"
         ;;
