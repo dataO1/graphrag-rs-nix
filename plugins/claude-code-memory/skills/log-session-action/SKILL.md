@@ -21,7 +21,13 @@ continuation of an earlier same-day session in the same project,
 in which case append; otherwise create fresh with frontmatter +
 table header).
 
-## Row format
+## Row formats
+
+The log file carries **two alternating table schemas** in
+chronological order. Pick the schema that matches the turn's
+output type.
+
+### Log entries — six columns
 
 ```
 | Time | Actions | Mutations | Why | Outcome | Related |
@@ -40,14 +46,44 @@ table header).
 - **Mutations** — files/configs/paths touched, comma-separated.
   `(none)` only for design-discussion rows.
 - **Why** — one sentence: motivation in technical/business terms,
-  not the literal task. ("Legal flagged the auth flow", not
-  "user asked me to fix auth".)
+  not the literal task.
 - **Outcome** — one phrase, what concretely landed.
 - **Related** — `[[wiki-link]]` references to knowledge docs.
   NEVER another log file. Comma-separated if multiple.
 
-Cells stay terse. If too conflated, split into multiple rows —
-do NOT create a sibling log document.
+Cells stay terse. If too conflated, split into multiple rows.
+
+### Decisions — seven columns
+
+```
+| Time | Context | Options | Decision | Rollout | Rollback | Related |
+```
+
+Use this schema when the turn produced a decision (choice between
+alternatives, with rationale). Decisions live in the log, not in
+knowledge notes — see the plugin CLAUDE.md "Decisions live in the
+log" section for the rationale.
+
+- **Time** — same source rule as above.
+- **Context** — what problem prompted the choice. 1–2 sentences.
+- **Options** — alternatives genuinely considered. Inline format:
+  `A: <name> — <one-line reason rejected/kept> / B: … / C: …`.
+  Only options that were really on the table; do not invent a
+  rejected option to look thorough.
+- **Decision** — chosen option + one-paragraph rationale. Why
+  the chosen path beats the others. Falsifiable reasoning, not
+  "because it's better".
+- **Rollout** — concrete steps the decision triggers (or
+  triggered). N/A only when there's nothing to roll out.
+- **Rollback** — concrete reverse steps if the decision turns out
+  wrong. N/A only when truly inapplicable; state the reason.
+- **Related** — `[[wiki-link]]` to other notes/decisions worth
+  linking. Same rules as the log Related column.
+
+Cells in the Decisions table run longer than log cells (Options
+and Decision often need a few clauses). The "Cells stay terse"
+rule loosens here — the schema's whole purpose is to hold prose
+that wouldn't fit in a log row.
 
 ## Append
 
@@ -55,8 +91,15 @@ Append at the file's end with
 `Bash(printf '| ... |\n' >> "$FILE")` — `>>` is append-only and
 cannot insert in the middle. Do NOT use `Edit` with a row-anchor
 (silently misplaces rows when parallel agents have appended in
-between). Order is strictly chronological because `Time` =
-row-write moment and writes are append-only.
+between).
+
+**Schema-matching rule:** before appending, check the schema of
+the latest table block in the file. If it matches your entry's
+type, append directly. If it doesn't, first append the matching
+table's header (blank line, header row, separator row), then
+append your row. Result is alternating chronological blocks of
+log → decision → log → decision (no awkward content fragmented
+across files).
 
 After append, `Edit` the frontmatter `topics:` line to union in
 any new wiki-links from this row's `Related` column.
@@ -77,3 +120,7 @@ topics: [[topic-a]], [[topic-b]]
 | Time | Actions | Mutations | Why | Outcome | Related |
 |------|---------|-----------|-----|---------|---------|
 ```
+
+(Decisions table headers are appended inline by the
+schema-matching rule when the first decision of the session
+fires.)

@@ -15,21 +15,26 @@ mid-session.
 This skill produces two kinds of artifact, and conflating them is
 the most common failure:
 
-1. **Distilled knowledge** — durable findings, decisions,
-   architectural insights, project models. Written as Markdown
-   notes into the user's recorded material per the conventions in
-   the plugin's CLAUDE.md "Storage conventions" section (subject-
-   topic notes go alongside other reference material; dated
-   reflections go in the journal area). Just write the file —
-   the long-term memory layer auto-indexes it.
-2. **Catch-up log rows** — rows for meaningful actions that
-   should have been logged via the `log-session-action` skill but
-   weren't. Written as table rows in today's session log file
-   (same format and same path convention as `log-session-action`).
+1. **Distilled knowledge notes** — durable, non-decision content:
+   research findings, architectural insights, behavior facts the
+   user will want to recall by topic rather than by date. Written
+   as Markdown notes under the knowledge corpus per the plugin
+   CLAUDE.md "Storage conventions". Just write the file — the
+   memory layer auto-indexes it.
+2. **Catch-up log rows** — log-table or decisions-table rows for
+   meaningful turns that should have been logged via
+   `log-session-action` but weren't. Use exactly the same two
+   schemas (six-column log rows / seven-column decision rows) and
+   the schema-matching append rule documented in the
+   `log-session-action` skill.
 
-Different files. Different cadences. Don't write a knowledge
-note that should be a log row. Don't write a log row that should
-be a knowledge note.
+Different files. Different cadences.
+
+**Decisions do NOT become knowledge notes** — they become rows in
+the Decisions sub-table of the log file (per the plugin CLAUDE.md
+"Decisions live in the log" section). If the only durable thing a
+turn produced was a decision, this skill's job is to catch up a
+missed Decisions row, not to write a sibling document.
 
 ## When to trigger
 
@@ -49,18 +54,20 @@ Review the conversation. Identify:
 
 - **Research findings worth keeping** — investigations that
   resolved with a concrete answer the user will want to recall
-  later. Distil into a knowledge note.
-- **Decisions** — choices between options. If not already
-  captured via `/claude-code-memory:document-decision`, capture
-  here with the same template (alternatives, rationale,
-  rollout/rollback).
+  later, by topic. Distil into a knowledge note.
 - **Architectural insights** — new mental-model facts about how
-  a system is composed or behaves.
+  a system is composed or behaves. Knowledge note.
 - **Unexpected outcomes** — things that behaved differently from
-  prior expectations.
+  prior expectations. Knowledge note.
+- **Decisions** — choices between options with rationale. NOT a
+  knowledge note. Append a row to the Decisions sub-table of
+  today's log file using the seven-column schema documented in
+  `log-session-action` (Context / Options / Decision / Rollout /
+  Rollback / Related).
 - **Unlogged meaningful actions** — meaningful units of work
   (architectural change, bug fix, non-trivial doc update,
   research) that were not logged via `log-session-action`.
+  Append catch-up log rows.
 
 If none of the above: nothing to consolidate. Exit without
 writing.

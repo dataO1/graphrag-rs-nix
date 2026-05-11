@@ -55,18 +55,32 @@ doubt, skip.
 These are independent triggers — most turns log only, some
 produce both, trivial turns produce neither.
 
+**Decisions live in the log, not in knowledge notes.** A decision
+(choice between alternatives, with rationale + rollout +
+rollback) is appended as a row in the **Decisions** sub-table of
+today's log file, NOT as a sibling document in the knowledge
+corpus. Reason: temporal context (when the decision was made,
+what surrounded it) is load-bearing for understanding the WHY
+later. The memory backend recall is cross-session and indexes log
+chunks just as well as knowledge notes, so retrieval doesn't
+suffer; what you gain is a chronological view that knowledge
+notes can't give. Knowledge notes are reserved for non-decision
+content (research findings, architectural insights, behavior
+facts the user will want to recall by topic rather than by date).
+
 **Order when both apply.** Run `consolidate-memory` FIRST, then
 `log-session-action`. The log row's `Related` column is meant to
-cite the knowledge notes that document the turn's substance — if
+cite knowledge notes that document the turn's substance — if
 logging runs first, that column can only reference pre-existing
 notes, and any note distilled from THIS turn would be unreachable
-from its own log row. Reversing the order makes the log a clean
-index into the freshly-written material.
+from its own log row. (Note: for turns whose only durable output
+IS a decision, no `consolidate-memory` call is needed — the
+decision row in the Decisions sub-table IS the durable artifact.)
 
 When the user says "wrap up", "save what we learned", or you
 sense the session is winding down, invoke
-`/claude-code-memory:consolidate-memory` to distil findings and
-catch up on missed log rows.
+`/claude-code-memory:consolidate-memory` to distil non-decision
+findings and catch up on missed log rows.
 
 ## Storage conventions
 
@@ -79,10 +93,33 @@ automatically. The two locations the skills need:
   directory (groups logs per-project; sessions in different
   projects produce different files; subagents inherit the parent's
   cwd so their rows land in the parent's project log). One file
-  per session; per-row table format. Append-only within a session;
-  never split a row's content into a sibling document.
+  per session; append-only.
+
+  Layout — two alternating table schemas in one chronological
+  file:
+
+  Log entries (six columns):
+
+  ```
+  | Time | Actions | Mutations | Why | Outcome | Related |
+  ```
+
+  Decisions (seven columns):
+
+  ```
+  | Time | Context | Options | Decision | Rollout | Rollback | Related |
+  ```
+
+  When appending, match the schema of the latest table in the
+  file. If the new entry's type doesn't match, start a new table
+  with the right header and append the entry there. Result is an
+  alternating chronological flow of log / decision / log /
+  decision blocks. Never split a row's content into a sibling
+  document — append a new table inline instead.
+
 - **Knowledge notes**: `@knowledgeRoot@/<Title>.md`.
-  Subject-topic notes (architecture, decisions, distilled findings,
-  reference material). Front-matter conventions match the existing
-  layout — read a sibling note in the same folder before writing
-  if unsure.
+  Subject-topic notes for non-decision content: research
+  findings, architectural insights, behavior facts, reference
+  material. Decisions do NOT go here (see above). Front-matter
+  conventions match the existing layout — read a sibling note in
+  the same folder before writing if unsure.
