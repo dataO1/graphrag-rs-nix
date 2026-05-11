@@ -20,8 +20,9 @@ refactoring, or debugging something the user has prior notes on),
 use the `/claude-code-memory:recall-and-think` skill instead of
 stitching ad-hoc recalls.
 
-**Logging structural check.** Before replying after a meaningful
-unit of work, ask: *"Did this turn produce an architectural
+**Logging structural check.** When the Stop or SubagentStop hook
+fires its end-of-turn nudge (look for `Now: <timestamp>` in the
+hook output), ask: *"Did this turn produce an architectural
 change, a bug fix, a non-trivial documentation write or edit
 (new file, restructured section, distilled findings — anything
 beyond a single-sentence tweak), a research finding, a decision
@@ -29,10 +30,12 @@ taken, an unexpected outcome that changes the user's mental
 model, OR did I (or a subagent I dispatched) complete a
 user-facing deliverable (new file, code change, config edit)?"*
 If YES — invoke `/claude-code-memory:log-session-action` BEFORE
-replying. Each meaningful turn gets its own row; don't batch or
-skip "because we already logged earlier" or "because the
-deliverable IS the artifact" — the log row is a SEPARATE
-artifact recording that the deliverable landed.
+replying. Do NOT invoke proactively mid-turn — wait for the
+nudge; the hook-injected `Now:` is what stamps the row. Each
+hook-nudged turn gets its own row; don't batch or skip "because
+we already logged earlier" or "because the deliverable IS the
+artifact" — the log row is a SEPARATE artifact recording that
+the deliverable landed.
 
 If you dispatched subagents this turn, their work counts toward
 the check. Their summaries are in your context — include them

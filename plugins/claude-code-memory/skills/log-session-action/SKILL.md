@@ -1,6 +1,6 @@
 ---
 name: log-session-action
-description: Append a row to today's session log table BEFORE replying to the user, whenever the just-completed turn produced any of: an architectural change, a bug fix, a non-trivial doc write or edit (new file, restructured section, distilled findings — anything beyond a one-sentence tweak), a research finding, a decision taken, an unexpected outcome that changes the user's mental model, OR a completed user-facing deliverable (new file, code change, config edit) — INCLUDING when the deliverable was produced by a subagent you dispatched (their work counts; the log row is a SEPARATE artifact from the deliverable itself). MUST be invoked structurally — before composing the reply, ask "did this turn (mine + any subagents I dispatched) produce one of those?" and if yes, fire this skill first. Each meaningful turn gets its own row, even if logged earlier in the session. Single-sentence tweaks, read-only operations (recall/grep/read), and trivial chores (git status, ls) do NOT trigger.
+description: Invoked ONLY by the Stop or SubagentStop hook's end-of-turn nudge — the nudge supplies the authoritative `Now:` timestamp that stamps the row. NEVER invoke proactively mid-turn; wait for the nudge. Append a row to today's session log table BEFORE replying to the user when the just-completed turn produced any of: an architectural change, a bug fix, a non-trivial doc write or edit (new file, restructured section, distilled findings — anything beyond a one-sentence tweak), a research finding, a decision taken, an unexpected outcome that changes the user's mental model, OR a completed user-facing deliverable (new file, code change, config edit) — INCLUDING when the deliverable was produced by a subagent you dispatched (their work counts; the log row is a SEPARATE artifact from the deliverable itself). MUST be invoked structurally — when the hook nudge fires, before composing the reply, ask "did this turn (mine + any subagents I dispatched) produce one of those?" and if yes, fire this skill first. Each hook-nudged turn that meets criteria gets its own row, even if logged earlier in the session. Single-sentence tweaks, read-only operations (recall/grep/read), and trivial chores (git status, ls) do NOT trigger.
 allowed-tools: "Bash(date *) Bash(mkdir *) Bash(printf *) Read Edit"
 ---
 
@@ -27,10 +27,13 @@ table header).
 | Time | Actions | Mutations | Why | Outcome | Related |
 ```
 
-- **Time** — `HH:MM:SS`. Use the `Now:` value from the Stop-hook
-  block reason that triggered this skill. If not present
-  (skill invoked outside a hook), run `Bash(date +%H:%M:%S)`.
-  NEVER infer from context — the model has no clock.
+- **Time** — `YYYY-MM-DD HH:MM:SS`. Use the `Now:` value
+  verbatim from the Stop or SubagentStop hook block reason that
+  triggered this skill (e.g. nudge `Now: 2026-05-11 09:44:28.`
+  → cell `2026-05-11 09:44:28`). If no `Now:` is present, the
+  skill is being invoked outside its supported entry point —
+  abort and do NOT log. NEVER infer from context — the model
+  has no clock.
 - **Actions** — one-line verb-phrase. For earlier-session actions,
   qualify in text ("Earlier this session: …"); `Time` always
   reflects row-write moment, not action time.
