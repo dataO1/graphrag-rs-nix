@@ -97,12 +97,6 @@ in
       # parallel sessions don't race.
       stopHook = assets.passthru.mkStopHook;
 
-      # Subagent-completion nudge. Fires in the PARENT's session
-      # at SubagentStop (subagents don't inherit parent's hooks
-      # so this is the only way to reach subagent-completion
-      # from the parent's settings).
-      subagentStopHook = assets.passthru.mkSubagentStopHook;
-
       # PostToolUse edit tracker. Touches a per-session sentinel
       # when the agent writes/edits a file under either configured
       # root, so the staleness hook can suppress alerts that are
@@ -206,26 +200,15 @@ in
             }
           ];
 
-          # SubagentStop hook: fires in the PARENT's session when
-          # a subagent finishes. Same block-and-continue mechanism
-          # as Stop but the block reason routes the parent through
-          # logging+distillation evaluation on behalf of the
-          # subagent's work. Subagents don't inherit parent's
-          # settings.json hooks (Claude Code-specific isolation;
-          # see Agent Extension Primitives Part 4 "Subagent hook
-          # scope") so this is the only way to enforce
-          # post-subagent-completion logging from a single point.
-          # Separate flag file from Stop so a parent turn can
-          # produce up to two nudges: one for subagent's work,
-          # one for parent's own work. Both per-session.
-          SubagentStop = [
-            {
-              matcher = "";
-              hooks = [
-                { type = "command"; command = toString subagentStopHook; }
-              ];
-            }
-          ];
+          # SubagentStop hook removed (2026-05-12).
+          # Under the skills-based fleet design (planner + orchestrator
+          # as main-session skills), main-session Stop is sufficient for
+          # logging/distillation. SubagentStop was intended to let the
+          # parent log on behalf of subagent work, but in practice the
+          # double-nudge (SubagentStop fires in parent, then Stop fires
+          # in parent for same turn) was redundant with the parent's own
+          # Stop nudge. Removing it simplifies the hook surface without
+          # losing any logging coverage.
 
           # PostToolUse edit tracker: records vault-root writes
           # so the staleness hook can suppress self-caused

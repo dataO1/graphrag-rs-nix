@@ -179,6 +179,21 @@ let
     PAYLOAD="$(cat 2>/dev/null || echo '{}')"
     CC_SESSION_ID="$(printf %s "$PAYLOAD" | "$JQ" -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")"
 
+    # Stop fires in the session where the response occurs — including
+    # inside leaf subagent sessions. The `agent_id` field is present
+    # in the hook payload when Stop fires inside a subagent context
+    # (documented in Claude Code hooks reference). We must not block
+    # subagent final responses: blocking forces an extra turn that
+    # displaces the contracted structured-YAML output with
+    # structural-check prose. Main-session Stop (where agent_id is
+    # absent) is sufficient for logging/distillation — leaf subagents
+    # produce no durable session log entries of their own; the
+    # orchestrator-skill logs per-card actions from the main session.
+    IS_SUBAGENT="$(printf %s "$PAYLOAD" | "$JQ" -r 'if .agent_id then "yes" else "no" end' 2>/dev/null || echo "no")"
+    if [ "$IS_SUBAGENT" = "yes" ]; then
+      exit 0
+    fi
+
     LOG_BLOCKED_FLAG="''${HOME}/.claude/log-blocked-this-turn-''${CC_SESSION_ID}"
 
     # Already nudged once this turn? Allow stop normally.
