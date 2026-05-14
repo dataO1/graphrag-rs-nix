@@ -10,7 +10,9 @@
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:integration": "bash test/integration/pi-live-smoke.sh",
+    "test:all": "vitest run && bash test/integration/pi-live-smoke.sh"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

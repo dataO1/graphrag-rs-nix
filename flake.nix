@@ -12,6 +12,13 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
+    # pi-mono — the pi coding agent runtime (unwrapped core, no pre-loaded
+    # extensions). We use this for integration tests that need a clean pi
+    # instance with only our extension loaded (HOME-isolated, --no-extensions).
+    # The user's HM-installed pi wrapper bundles multiple extensions; pointing
+    # tests at the unwrapped pi-coding-agent avoids polluting their session.
+    pi-mono.url = "github:lukasl-dev/pi-mono.nix";
+
     # graphrag-rs source — our fork on the openai-compat branch. The fork
     # carries vendored fixes that used to live in pkgs/graphrag-rs.nix's
     # prePatch (qdrant-client features, /api/config scope-shadow, OLLAMA_PORT,
@@ -29,7 +36,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, crane, rust-overlay, graphrag-rs-src, ... }:
+  outputs = { self, nixpkgs, flake-utils, crane, rust-overlay, pi-mono, graphrag-rs-src, ... }:
     let
       systems = [ "x86_64-linux" ];
     in
@@ -90,10 +97,15 @@
         # pi memory extension — esbuild-bundled TypeScript plugin.
         # Output: dist/index.js, symlinked into ~/.pi/agent/extensions/.
         pi-memory-plugin = pkgs.callPackage ./pkgs/pi-memory-plugin.nix { };
+
+        # Unwrapped pi coding agent (no pre-loaded extensions).
+        # Used by integration tests to get a clean pi instance with
+        # only our extension loaded (HOME-isolated, --no-extensions).
+        pi-coding-agent = pi-mono.packages.${system}.coding-agent;
       in
       {
         packages = {
-          inherit graphrag-rs memory-mcp knowledge-watcher claude-code-memory-plugin pi-memory-plugin;
+          inherit graphrag-rs memory-mcp knowledge-watcher claude-code-memory-plugin pi-memory-plugin pi-coding-agent;
           graphrag-server = graphrag-rs.server;
           default = graphrag-rs.server;
         };
@@ -105,8 +117,10 @@
             # TypeScript tooling for pi extension development
             nodejs_22
             esbuild
-            nodePackages.typescript
-            nodePackages.tsx
+            typescript
+            tsx
+            # Clean pi for integration tests (HOME-isolated, --no-extensions)
+            pi-coding-agent
           ];
         };
 
