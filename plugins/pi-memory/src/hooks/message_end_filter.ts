@@ -18,15 +18,6 @@
 // SAFETY: we never collapse message content to empty — that would
 // orphan tool_use/tool_result blocks and cause unrecoverable session
 // corruption (pi-mono issue #4189).
-//
-// EMPTY-CONTENT GUARD (2026-05-14): some providers (deepseek) reject
-// assistant messages with neither content nor tool_calls (400:
-// "Invalid assistant message: content or tool_calls must be set").
-// This happens when the model receives an async-dispatch tool result
-// that says "end your turn now" and the model produces content: [].
-// We inject a minimal text block so the message passes validation.
-// Safe because we only inject when the original content was ALREADY
-// empty — no tool calls to orphan.
 // ---------------------------------------------------------------------------
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -67,17 +58,8 @@ export function registerMessageEndFilterHook(
     //    `.some()` crash in Pi's UI (regression safety net).
     // 2. Content was an array but we stripped empty-name tool calls
     //    (original purpose of this hook).
-    // 3. Content is completely empty → inject fallback text to prevent
-    //    provider 400 errors (deepseek rejects empty assistant messages).
-    const needsNormalize = !Array.isArray(msg.content);
-    const needsFilter = filtered.length !== normalized.length;
-    const isEmpty = filtered.length === 0;
-
-    if (needsNormalize || needsFilter || isEmpty) {
-      const safe = isEmpty
-        ? [{ type: "text", text: "⏳" }]
-        : filtered;
-      return { message: { ...msg, content: safe } };
+    if (filtered.length !== normalized.length || !Array.isArray(msg.content)) {
+      return { message: { ...msg, content: filtered } };
     }
     return undefined;
   });
