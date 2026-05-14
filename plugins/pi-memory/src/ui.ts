@@ -2,16 +2,17 @@
 //
 // `recall` and `remember` get their normal tool-call windows
 // suppressed (the recall answer feeds the LLM's response; the
-// remember confirmation is just operational noise). The badge
-// is the only user-visible artefact for those two tools, so it
-// has to convey state cleanly:
+// remember confirmation is just operational noise). The Working
+// indicator is the only user-visible artefact for those two
+// tools, so it has to convey state cleanly:
 //
-//    state           badge       cadence
+//    state           Working text    Working indicator
 //    ───────────────────────────────────────────────────
-//    disconnected    (empty)     —
-//    idle            (empty)     —
-//    recalling       mem ▁▂▃▄▅▆▇█  200 ms/frame  (slow pulse)
-//    remembering     mem ■ / □     150 ms/frame  (fast blink)
+//    recalling       Recalling…      ◈◇◆◇ 200 ms/frame  (slow pulse)
+//    remembering     Remembering…    ●○   150 ms/frame  (fast blink)
+//
+// The "mem ●/○" toolbar badge has been removed — the Working
+// text already shows what's happening, no need for a second indicator.
 //
 // When more than one in-flight call overlaps (rare, but the
 // agent CAN fire concurrent tools), we count refs per state and
@@ -32,7 +33,6 @@ import {
   PING_TIMEOUT_MS,
   BASE_URL,
 } from "./config";
-import { pendingStalenessNotes } from "./sse";
 
 // ── Shared mutable state ──────────────────────────────────────────
 // Wrapped in a mutable object so ES module consumers can mutate
@@ -59,12 +59,7 @@ let frameIdx = 0;
 let animTimer: ReturnType<typeof setInterval> | undefined;
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 
-// ── Badge primitives ──────────────────────────────────────────────
-
-function setBadge(text: string) {
-  if (!state.ui) return;
-  state.ui.setStatus("mem", text);
-}
+// ── Working indicator primitives ──────────────────────────────────
 
 function stopAnim() {
   if (animTimer) {
@@ -76,27 +71,24 @@ function stopAnim() {
 function startAnim(frames: string[], intervalMs: number) {
   stopAnim();
   frameIdx = 0;
-  setBadge(`mem ${frames[0]}`);
   animTimer = setInterval(() => {
     frameIdx = (frameIdx + 1) % frames.length;
-    setBadge(`mem ${frames[frameIdx]}`);
   }, intervalMs);
 }
 
 export function refreshBadge() {
-  const stalenessTrail =
-    pendingStalenessNotes.length > 0 ? " !" : "";
   if (state.rememberActive > 0) {
     startAnim(BLINK_FRAMES, BLINK_FRAME_MS);
     state.ui?.setWorkingIndicator(REMEMBER_INDICATOR);
+    state.ui?.setWorkingMessage("Remembering…");
   } else if (state.recallActive > 0) {
     startAnim(PULSE_FRAMES, PULSE_FRAME_MS);
     state.ui?.setWorkingIndicator(RECALL_INDICATOR);
+    state.ui?.setWorkingMessage("Recalling…");
   } else {
     stopAnim();
     state.ui?.setWorkingIndicator(undefined as any);
-    const dot = state.serverReachable ? "●" : "○";
-    setBadge(`mem ${dot}${stalenessTrail}`);
+    state.ui?.setWorkingMessage(undefined);
   }
 }
 
