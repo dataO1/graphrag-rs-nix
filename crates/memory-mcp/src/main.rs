@@ -118,9 +118,9 @@ fn tool_definitions() -> Value {
                         "question": { "type": "string", "description": "Natural-language question. Keep the user's wording when possible — it often retrieves better than aggressive paraphrase." },
                         "mode": {
                             "type": "string",
-                            "enum": ["default", "thorough", "local", "simple", "deep"],
+                            "enum": ["default", "quick"],
                             "default": "default",
-                            "description": "Pick by question shape, not retry count. `default` = relational + semantic (95% of cases). `thorough` = + verbatim, for compound/wide searches. `local` = entity-centric, for a specific named entity already in memory. `simple` = verbatim only (~350ms probe), cheap topic-existence check. `deep`: Use for multi-hop questions where the query phrasing is abstract but answers are likely entity-specific (e.g. \"what are my next tasks?\", \"what did X say about Y?\"). Slower (+50\u{2013}200\u{a0}ms) than default \u{2014} pick when default returns 0-or-few hits or the question requires bridging entities across notes."
+                            "description": "`default`: Returns a synthesised answer with full multi-hop reasoning across the knowledge graph. Handles complex, associative, or multi-step questions. ~6s. `quick`: Returns fast keyword-matched excerpts directly, without synthesis. Use for straightforward lookups or existence checks. ~50ms."
                         },
                         "max_results": { "type": "integer", "default": 8, "description": "Top-K seeds. 5-10 typical." },
                         "as_of": { "type": "string", "format": "date-time", "description": "RFC 3339; only consider chunks valid at-or-after this time. Use whenever the user references time ('today', 'since X')." },
@@ -213,24 +213,20 @@ async fn call_tool(
             // mode names onto graphrag-server's /api/query mode field.
             //
             // Agent-facing → server mode:
-            //   default     → hybrid    (LightRAG paper recommended)
-            //   thorough    → mix       (hybrid + raw chunk recall)
-            //   local       → local     (entity-vector seeded only)
-            //   simple      → search    (vector excerpts, no LLM)
+            //   default → hipporag  (full multi-hop synthesis via HippoRAG)
+            //   quick   → search    (fast vector-keyword excerpt lookup, no LLM)
             //
-            // The server's `global` mode exists for completeness but
-            // is intentionally NOT exposed here — agents reliably
-            // misroute to it where `default`/`thorough` answer the
-            // same questions equally well.
+            // Removed mappings (hipporag-consolidation plan):
+            //   thorough → mix     (was: hybrid + raw chunk recall)
+            //   local    → local   (was: entity-vector seeded only)
+            //   simple   → search  (was: vector excerpts, no LLM)
+            //   deep     → hipporag (was: multi-hop HippoRAG, now the default)
             let agent_mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("default");
             let server_mode = match agent_mode {
-                "default" => "hybrid",
-                "thorough" => "mix",
-                "local" => "local",
-                "simple" => "search",
-                "deep" => "hipporag",
+                "default" => "hipporag",
+                "quick" => "search",
                 other => anyhow::bail!(
-                    "unknown mode: {other} (expected one of: default, thorough, local, simple, deep)"
+                    "unknown mode: {other} (expected one of: default, quick)"
                 ),
             };
             // Forward optional history-aware params verbatim. Default
@@ -497,38 +493,31 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Test 1 — schema: mode enum must include "deep"
+    // Test 1 — schema: mode enum must be exactly ["default", "quick"]
     // ---------------------------------------------------------------------------
     #[test]
-    fn test_mode_enum_includes_deep() {
+    fn test_mode_enum_is_default_and_quick_only() {
         let variants = recall_mode_enum();
-        assert!(
-            variants.contains(&"deep".to_string()),
-            "mode enum {variants:?} must contain 'deep'"
+        assert_eq!(
+            variants,
+            vec!["default".to_string(), "quick".to_string()],
+            "mode enum must be exactly [\"default\", \"quick\"], got {variants:?}"
         );
-        // Existing modes must not have been dropped.
-        for expected in &["default", "thorough", "local", "simple"] {
+        // Removed modes must NOT appear.
+        for removed in &["thorough", "local", "simple", "deep"] {
             assert!(
-                variants.contains(&expected.to_string()),
-                "mode enum must still contain '{expected}'"
+                !variants.contains(&removed.to_string()),
+                "mode enum must NOT contain removed mode '{removed}'"
             );
         }
     }
 
     // ---------------------------------------------------------------------------
-    // Test 2 — description copy: mode "deep" description must match verbatim.
-    // The EXPECTED fragment uses the same Unicode characters as the description
-    // in tool_definitions(): en-dash U+2013, non-breaking space U+00A0, em-dash U+2014.
+    // Test 2 — description: must contain new descriptions for "default" and
+    // "quick" and must NOT contain implementation names or removed mode names.
     // ---------------------------------------------------------------------------
     #[test]
-    fn test_deep_mode_description_matches_verbatim() {
-        // Verbatim copy from card 4 — must match what tool_definitions() embeds.
-        const EXPECTED: &str = concat!(
-            "Use for multi-hop questions where the query phrasing is abstract but answers are likely entity-specific ",
-            "(e.g. \"what are my next tasks?\", \"what did X say about Y?\"). ",
-            "Slower (+50\u{2013}200\u{a0}ms) than default \u{2014} pick when default returns 0-or-few hits or the question requires bridging entities across notes."
-        );
-
+    fn test_mode_description_clean() {
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().expect("tools array");
         let recall = tools.iter().find(|t| t["name"] == "recall").expect("recall tool");
@@ -536,54 +525,51 @@ mod tests {
             .as_str()
             .expect("mode description string");
 
-        // The description must contain the verbatim fragment for "deep".
+        // Must mention both public-facing mode names.
         assert!(
-            mode_desc.contains(EXPECTED),
-            "mode description does not contain the required verbatim copy for 'deep'.\n\
-             Expected fragment:\n{EXPECTED}\n\nActual description:\n{mode_desc}"
+            mode_desc.contains("default"),
+            "mode description must mention 'default'"
         );
+        assert!(
+            mode_desc.contains("quick"),
+            "mode description must mention 'quick'"
+        );
+
+        // Must NOT contain internal server mode names or removed agent modes.
+        for forbidden in &["hipporag", "hybrid", "mix", "thorough", "local", "simple", "deep"] {
+            assert!(
+                !mode_desc.contains(forbidden),
+                "mode description must NOT contain '{forbidden}'"
+            );
+        }
     }
 
     // ---------------------------------------------------------------------------
-    // Test 3 — integration: recall with mode:"deep" sends mode:"hipporag" to server
+    // Test 3 — integration: recall with mode:"default" sends mode:"hipporag"
     // ---------------------------------------------------------------------------
     #[tokio::test]
-    async fn test_deep_mode_round_trips_to_hipporag() {
+    async fn test_default_mode_round_trips_to_hipporag() {
         use tokio::net::TcpListener;
 
-        // Spin up a mock HTTP server that accepts exactly one request and
-        // captures the JSON body.  We reply with a minimal valid /api/query
-        // response so reqwest doesn't error.
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
-
-        // Shared channel: mock sends captured mode string to the test.
         let (tx, rx) = tokio::sync::oneshot::channel::<String>();
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-
-            // Read the HTTP request (headers + body).
             let mut buf = vec![0u8; 4096];
             let n = stream.read(&mut buf).await.expect("read");
             let raw = String::from_utf8_lossy(&buf[..n]);
-
-            // Extract the JSON body (everything after the blank line).
             let body_str = raw.split("\r\n\r\n").nth(1).unwrap_or("{}");
-
             let body: serde_json::Value =
                 serde_json::from_str(body_str.trim_end_matches('\0'))
                     .unwrap_or(serde_json::Value::Null);
-
             let mode = body
                 .get("mode")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_owned();
-
             let _ = tx.send(mode);
-
-            // Reply with a minimal 200 OK so reqwest's error_for_status doesn't panic.
             let response_body = r#"{"results":[],"answer":""}"#;
             let http_resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -593,33 +579,123 @@ mod tests {
             stream.write_all(http_resp.as_bytes()).await.expect("write");
         });
 
-        // Build a Config pointing at the mock.
         let cfg = Config {
             base_url: format!("http://{addr}"),
             timeout_secs: 10,
             session_id: None,
         };
-
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("client");
 
         let args = serde_json::json!({
-            "question": "what are my next tasks?",
-            "mode": "deep"
+            "question": "what are my current priorities?",
+            "mode": "default"
         });
 
-        // call_tool drives the full mode-mapping logic.
         let _result = call_tool(&client, &cfg, None, "recall", &args)
             .await
             .expect("call_tool");
 
-        // Verify the mock received mode:"hipporag".
         let captured_mode = rx.await.expect("mode captured");
         assert_eq!(
             captured_mode, "hipporag",
-            "expected server-side mode 'hipporag' but got '{captured_mode}'"
+            "expected server-side mode 'hipporag' for agent mode 'default' but got '{captured_mode}'"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test 4 — integration: recall with mode:"quick" sends mode:"search"
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_quick_mode_round_trips_to_search() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).await.expect("read");
+            let raw = String::from_utf8_lossy(&buf[..n]);
+            let body_str = raw.split("\r\n\r\n").nth(1).unwrap_or("{}");
+            let body: serde_json::Value =
+                serde_json::from_str(body_str.trim_end_matches('\0'))
+                    .unwrap_or(serde_json::Value::Null);
+            let mode = body
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let _ = tx.send(mode);
+            let response_body = r#"{"results":[],"answer":""}"#;
+            let http_resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(http_resp.as_bytes()).await.expect("write");
+        });
+
+        let cfg = Config {
+            base_url: format!("http://{addr}"),
+            timeout_secs: 10,
+            session_id: None,
+        };
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("client");
+
+        let args = serde_json::json!({
+            "question": "does note X exist?",
+            "mode": "quick"
+        });
+
+        let _result = call_tool(&client, &cfg, None, "recall", &args)
+            .await
+            .expect("call_tool");
+
+        let captured_mode = rx.await.expect("mode captured");
+        assert_eq!(
+            captured_mode, "search",
+            "expected server-side mode 'search' for agent mode 'quick' but got '{captured_mode}'"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test 5 — unknown mode returns an error (not a panic)
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_unknown_mode_returns_error() {
+        // No server needed — the error fires before any HTTP call.
+        let cfg = Config {
+            base_url: "http://127.0.0.1:1".to_string(), // unreachable port
+            timeout_secs: 1,
+            session_id: None,
+        };
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .expect("client");
+
+        let args = serde_json::json!({
+            "question": "test",
+            "mode": "deep"  // was valid before, must now be unknown
+        });
+
+        let result = call_tool(&client, &cfg, None, "recall", &args).await;
+        assert!(
+            result.is_err(),
+            "expected an error for removed mode 'deep' but got Ok"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("unknown mode"),
+            "error message should mention 'unknown mode', got: {err_msg}"
         );
     }
 }
