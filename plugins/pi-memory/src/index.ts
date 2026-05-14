@@ -20,6 +20,7 @@ import { registerLogDecision } from "./tools/log_decision";
 
 // Hooks
 import { registerDistillHook } from "./distill";
+import { registerDistillSummaryRenderer, registerDistillSummaryHook } from "./hooks/message_end_distill";
 import { registerBeforeAgentStartHook } from "./hooks/before_agent_start";
 import { registerMessageEndFilterHook } from "./hooks/message_end_filter";
 import { registerMessageEndCacheHook } from "./hooks/message_end_cache";
@@ -39,11 +40,15 @@ export default function (pi: ExtensionAPI): void {
   // ── Commands ────────────────────────────────────────────────
   registerCommands(pi);
 
+  // ── Renderers (register before hooks that consume them) ──
+  registerDistillSummaryRenderer(pi);
+
   // ── Hooks (order: lifecycle first, then per-turn) ───────────
   registerLifecycleHooks(pi);
   registerBeforeAgentStartHook(pi);
   registerMessageEndFilterHook(pi);
   registerMessageEndCacheHook(pi);
+  registerDistillSummaryHook(pi);
 
   // ── Distillation (must register after hooks — it uses agent_end) ──
   registerDistillHook(pi);

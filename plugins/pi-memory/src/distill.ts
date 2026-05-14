@@ -43,13 +43,22 @@ export const DISTILL_NUDGE =
   "context is load-bearing). Single-sentence tweaks, read-only " +
   "operations (recall/grep/read), and trivial chores (ls, git " +
   "status) do NOT trigger.\n\n" +
-  "If nothing triggered: respond with just '.'. If you logged " +
-  "or consolidated: respond with 'logged' or 'consolidated' or " +
-  "'consolidated+logged'. Keep it terse.";
+  "If nothing triggered: respond with exactly '✓ nothing to distill' (a single " +
+  "line, no preamble).\n" +
+  "If you called memory_remember: respond with '📝 consolidated: <title>' (use the " +
+  "title you passed to memory_remember).\n" +
+  "If you called memory_log_action or memory_log_decision: count them and respond " +
+  "with '📝 logged: N actions + M decisions' (omit zero counts, e.g. '📝 logged: 1 action').\n" +
+  "If you did both: '📝 consolidated: <title> + logged: N actions'.\n" +
+  "Keep it to ONE line, no preamble, no follow-up text.";
 
 // ── Recursion guard state ─────────────────────────────────────────
 let forcedDistillTurn = false;
 let savedDistillThinking: string | undefined;
+
+export function isDistillTurn(): boolean {
+  return forcedDistillTurn;
+}
 
 export function registerDistillHook(pi: ExtensionAPI): void {
   pi.on("agent_end", async (_event, ctx) => {
