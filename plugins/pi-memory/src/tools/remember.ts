@@ -73,6 +73,11 @@ export function registerRemember(pi: ExtensionAPI) {
       incRemember();
       refreshBadge();
 
+      const sessionFile = (ctx.sessionManager as any).sessionFile as string | undefined;
+      const sessionLabel = sessionFile
+        ? ` to ${sessionFile.split("/").pop()?.replace(".jsonl", "") ?? sessionFile}`
+        : "";
+
       const body: Record<string, unknown> = {};
       if (params.path !== undefined) body.path = params.path;
       if (params.pathsGlob !== undefined)
@@ -90,6 +95,7 @@ export function registerRemember(pi: ExtensionAPI) {
       if (hasContent && !body.source) {
         body.source = `pi://generated/${crypto.randomUUID?.() ?? `pi-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`}`;
       }
+      if (sessionFile) body.session = sessionFile;
 
       // Fire-and-forget: schedule the POST, return immediately.
       void (async () => {
@@ -111,7 +117,7 @@ export function registerRemember(pi: ExtensionAPI) {
       })();
 
       return {
-        content: [{ type: "text", text: "queued" }],
+        content: [{ type: "text", text: `queued${sessionLabel}` }],
       };
     },
   });

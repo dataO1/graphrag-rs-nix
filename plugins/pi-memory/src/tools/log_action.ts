@@ -57,6 +57,10 @@ export function registerLogAction(pi: ExtensionAPI) {
       try {
         const now = new Date().toISOString();
         const day = now.slice(0, 10);
+        const sessionFile = (ctx.sessionManager as any).sessionFile as string | undefined;
+        const sessionLabel = sessionFile
+          ? ` to ${sessionFile.split("/").pop()?.replace(".jsonl", "") ?? sessionFile}`
+          : "";
         const title = `[LOG] ${day} — ${params.actions.slice(0, 72)}`;
         const related = params.related?.length
           ? params.related
@@ -72,9 +76,10 @@ export function registerLogAction(pi: ExtensionAPI) {
           title,
           content,
           source: `pi:///log/${now.slice(0, 10)}`,
+          session: sessionFile ?? null,
         });
         return {
-          content: [{ type: "text", text: "logged" }],
+          content: [{ type: "text", text: `logged${sessionLabel}` }],
         };
       } catch (e: any) {
         ctx.ui.notify(

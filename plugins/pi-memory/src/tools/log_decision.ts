@@ -62,6 +62,10 @@ export function registerLogDecision(pi: ExtensionAPI) {
       try {
         const now = new Date().toISOString();
         const day = now.slice(0, 10);
+        const sessionFile = (ctx.sessionManager as any).sessionFile as string | undefined;
+        const sessionLabel = sessionFile
+          ? ` to ${sessionFile.split("/").pop()?.replace(".jsonl", "") ?? sessionFile}`
+          : "";
         const title = `[DECISION] ${day} — ${params.decision.slice(0, 72)}`;
         const related = params.related?.length
           ? params.related
@@ -77,9 +81,10 @@ export function registerLogDecision(pi: ExtensionAPI) {
           title,
           content,
           source: `pi:///decision/${now.slice(0, 10)}`,
+          session: sessionFile ?? null,
         });
         return {
-          content: [{ type: "text", text: "logged" }],
+          content: [{ type: "text", text: `logged${sessionLabel}` }],
         };
       } catch (e: any) {
         ctx.ui.notify(
