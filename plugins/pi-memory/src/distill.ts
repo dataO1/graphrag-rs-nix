@@ -9,9 +9,25 @@
 // The LLM's compact reply (".", "logged", "consolidated+logged") flows
 // through intact — we never collapse message content (that would orphan
 // tool_use/tool_result blocks — pi-mono issue #4189).
+//
+// Milestone journal: tool_result hooks detect todo completions and
+// subagent finishes, storing lightweight references (id + subject, not
+// full content — the LLM already has the results in its KV cache).
+// These are injected into the agent_end nudge as a short reminder line
+// so the LLM sees "you had these notable events" without re-reading the
+// full tool output. Subagent sessions (PI_SUBAGENT_CHILD=1) are fully
+// skipped — subagents don't do their own logging.
 // ---------------------------------------------------------------------------
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+
+// ── Milestone journal (lightweight, not full content) ────────────
+interface MilestoneEntry {
+  type: "todo_completed" | "subagent_finished";
+  label: string; // compact one-line description (~10-30 tokens)
+}
+
+const pendingMilestones: MilestoneEntry[] = [];
 
 export const DISTILL_NUDGE =
   "[memory] Distillation structural check. Higher bar. Ask: 'Did " +
@@ -60,7 +76,67 @@ export function isDistillTurn(): boolean {
   return forcedDistillTurn;
 }
 
+// ── Milestone journal (tool_result → agent_end injection) ────────
+
+function recordTodoCompleted(input: Record<string, unknown>): void {
+  const subject =
+    typeof input.subject === "string"
+      ? input.subject
+      : typeof input.activeForm === "string"
+        ? input.activeForm
+        : `#${String(input.id ?? "?")}`;
+  pendingMilestones.push({ type: "todo_completed", label: subject });
+}
+
+function recordSubagentFinished(input: Record<string, unknown>): void {
+  const agent =
+    typeof input.agent === "string" ? input.agent : "subagent";
+  const task =
+    typeof input.task === "string"
+      ? input.task.slice(0, 60)
+      : "finished";
+  pendingMilestones.push({
+    type: "subagent_finished",
+    label: `${agent}: ${task}`,
+  });
+}
+
+function buildMilestonePrefix(): string {
+  if (pendingMilestones.length === 0) return "";
+  const lines = pendingMilestones.map((m) => {
+    const icon =
+      m.type === "todo_completed" ? "☑" : "⬢";
+    return `${icon} ${m.label}`;
+  });
+  // Clear after reading — each nudge consumes the journal.
+  pendingMilestones.length = 0;
+  return `[memory] Notable this turn:\n${lines.join("\n")}\n\n`;
+}
+
 export function registerDistillHook(pi: ExtensionAPI): void {
+  // ── tool_result: journal milestones (lightweight, no full content) ──
+  pi.on("tool_result", async (event) => {
+    if (event.isError) return;
+    const input = event.input as Record<string, unknown>;
+
+    // Todo completed — todo tool from rpiv-todo
+    if (
+      event.toolName === "todo" &&
+      input.action === "update" &&
+      input.status === "completed"
+    ) {
+      recordTodoCompleted(input);
+      return;
+    }
+
+    // Subagent finished — subagent tool from pi-subagents
+    if (event.toolName === "subagent") {
+      recordSubagentFinished(input);
+      return;
+    }
+  });
+
+  // ── agent_end: fire the nudge (main agent only — subagents skip via index.ts gate) ──
   pi.on("agent_end", async (_event, ctx) => {
     if (forcedDistillTurn) {
       forcedDistillTurn = false;
@@ -75,11 +151,15 @@ export function registerDistillHook(pi: ExtensionAPI): void {
     savedDistillThinking = pi.getThinkingLevel();
     pi.setThinkingLevel("low");
 
+    // Prepend milestone journal (if any) to the standard nudge.
+    const prefix = buildMilestonePrefix();
+    const nudge = prefix + DISTILL_NUDGE;
+
     // display:false → sent to LLM context, NOT rendered in chat
     pi.sendMessage(
       {
         customType: "memory-distill-nudge",
-        content: DISTILL_NUDGE,
+        content: nudge,
         display: false,
       },
       { triggerTurn: true },

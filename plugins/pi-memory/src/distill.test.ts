@@ -73,6 +73,7 @@ describe("isDistillTurn", () => {
 
 describe("registerDistillHook", () => {
   let pi: {
+    _handlers: Map<string, Array<(event: any, ctx: any) => Promise<void>>>;
     _agentEndHandlers: Array<(event: any, ctx: any) => Promise<void>>;
     on: ReturnType<typeof vi.fn>;
     setThinkingLevel: ReturnType<typeof vi.fn>;
@@ -82,11 +83,19 @@ describe("registerDistillHook", () => {
 
   beforeEach(async () => {
     vi.resetModules();
-    const handlers: Array<(event: any, ctx: any) => Promise<void>> = [];
+    const handlerMap = new Map<string, Array<(event: any, ctx: any) => Promise<void>>>();
+    const agentEndHandlers: Array<(event: any, ctx: any) => Promise<void>> = [];
+    handlerMap.set("agent_end", agentEndHandlers);
     pi = {
-      _agentEndHandlers: handlers,
-      on: vi.fn((_event: string, handler: any) => {
-        handlers.push(handler);
+      _handlers: handlerMap,
+      _agentEndHandlers: agentEndHandlers,
+      on: vi.fn((event: string, handler: any) => {
+        let arr = handlerMap.get(event);
+        if (!arr) {
+          arr = [];
+          handlerMap.set(event, arr);
+        }
+        arr.push(handler);
       }),
       setThinkingLevel: vi.fn(),
       getThinkingLevel: vi.fn(() => "high"),
@@ -94,11 +103,17 @@ describe("registerDistillHook", () => {
     };
   });
 
+  /** Fire an agent_end event through the registered handler. */
   async function fireAgentEnd(importFn: () => Promise<any>) {
     const { registerDistillHook } = await importFn();
     registerDistillHook(pi as any);
-    const handler = pi._agentEndHandlers[0];
+    const handler = pi._handlers.get("agent_end")![0];
     await handler({}, {});
+  }
+
+  /** Get the first registered agent_end handler. */
+  function getAgentEndHandler(): (event: any, ctx: any) => Promise<void> {
+    return pi._handlers.get("agent_end")![0];
   }
 
   it("sends a distill nudge on first agent_end", async () => {
@@ -125,7 +140,7 @@ describe("registerDistillHook", () => {
     const mod = await import("./distill");
     mod.registerDistillHook(pi as any);
 
-    const handler = pi._agentEndHandlers[0];
+    const handler = getAgentEndHandler();
 
     // First agent_end → should send nudge
     await handler({}, {});
@@ -141,7 +156,7 @@ describe("registerDistillHook", () => {
 
     const mod = await import("./distill");
     mod.registerDistillHook(pi as any);
-    const handler = pi._agentEndHandlers[0];
+    const handler = getAgentEndHandler();
 
     // First agent_end → distill turn starts
     await handler({}, {});
@@ -163,20 +178,20 @@ describe("registerDistillHook", () => {
     };
 
     mod.registerDistillHook(pi as any);
-    // Handlers: [distillHook]
+    const handler = getAgentEndHandler();
 
     // Before first agent_end
     expect(mod.isDistillTurn()).toBe(false);
 
-    // First agent_end → distill queued. Run distill hook only.
-    await pi._agentEndHandlers[0]({}, {});
+    // First agent_end → distill queued.
+    await handler({}, {});
 
     // Second agent_end → insert observation BEFORE distill hook
-    pi._agentEndHandlers.unshift(observeHandler);
-    // Handlers: [observeHandler, distillHook]
+    const agentEndHandlers = pi._handlers.get("agent_end")!;
+    agentEndHandlers.unshift(observeHandler);
     // Run both in order
-    await pi._agentEndHandlers[0]({}, {});
-    await pi._agentEndHandlers[1]({}, {});
+    await agentEndHandlers[0]({}, {});
+    await agentEndHandlers[1]({}, {});
 
     expect(capturedDuringSecondCall).toBe(true);
 
@@ -187,7 +202,7 @@ describe("registerDistillHook", () => {
   it("isDistillTurn returns false after a non-distill turn resets state", async () => {
     const mod = await import("./distill");
     mod.registerDistillHook(pi as any);
-    const handler = pi._agentEndHandlers[0];
+    const handler = getAgentEndHandler();
 
     await handler({}, {}); // start distill
     await handler({}, {}); // finish distill
@@ -203,12 +218,135 @@ describe("registerDistillHook", () => {
 
     const mod = await import("./distill");
     mod.registerDistillHook(pi as any);
-    const handler = pi._agentEndHandlers[0];
+    const handler = getAgentEndHandler();
 
     await handler({}, {}); // start distill with undefined thinking
     await handler({}, {}); // finish distill — should not crash
 
     // Should not have called setThinkingLevel with undefined on restore
     // The second setThinkingLevel call should either not happen or handle gracefully
+  });
+
+  // ── Milestone journal tests ───────────────────────────────────
+
+  it("journals todo completions via tool_result", async () => {
+    const mod = await import("./distill");
+    mod.registerDistillHook(pi as any);
+
+    const toolResultHandlers = pi._handlers.get("tool_result")!;
+    expect(toolResultHandlers).toBeDefined();
+
+    // Fire a todo-completed tool_result
+    await toolResultHandlers[0]({
+      type: "tool_result",
+      toolName: "todo",
+      toolCallId: "t1",
+      isError: false,
+      input: { action: "update", status: "completed", subject: "Fix bug", id: 3 },
+      content: [],
+      details: null,
+    }, {});
+
+    // Fire agent_end — should include milestone in nudge
+    const agentHandler = getAgentEndHandler();
+    await agentHandler({}, {});
+
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+    const call = (pi.sendMessage as any).mock.calls[0];
+    expect(call[0].content).toContain("[memory] Notable this turn:");
+    expect(call[0].content).toContain("Fix bug");
+  });
+
+  it("journals subagent completions via tool_result", async () => {
+    const mod = await import("./distill");
+    mod.registerDistillHook(pi as any);
+
+    const toolResultHandlers = pi._handlers.get("tool_result")!;
+
+    await toolResultHandlers[0]({
+      type: "tool_result",
+      toolName: "subagent",
+      toolCallId: "t2",
+      isError: false,
+      input: { agent: "researcher", task: "find hook patterns" },
+      content: [],
+      details: null,
+    }, {});
+
+    const agentHandler = getAgentEndHandler();
+    await agentHandler({}, {});
+
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+    const call = (pi.sendMessage as any).mock.calls[0];
+    expect(call[0].content).toContain("[memory] Notable this turn:");
+    expect(call[0].content).toContain("researcher: find hook patterns");
+  });
+
+  it("skips errored tool_results", async () => {
+    const mod = await import("./distill");
+    mod.registerDistillHook(pi as any);
+
+    const toolResultHandlers = pi._handlers.get("tool_result")!;
+
+    // Errored subagent
+    await toolResultHandlers[0]({
+      type: "tool_result",
+      toolName: "subagent",
+      toolCallId: "t3",
+      isError: true,
+      input: { agent: "researcher", task: "crashed" },
+      content: [],
+      details: null,
+    }, {});
+
+    const agentHandler = getAgentEndHandler();
+    await agentHandler({}, {});
+
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+    const call = (pi.sendMessage as any).mock.calls[0];
+    // Should NOT contain notable milestones (errored subagent skipped)
+    expect(call[0].content).not.toContain("Notable this turn");
+  });
+
+  it("clears milestones after each nudge", async () => {
+    const mod = await import("./distill");
+    mod.registerDistillHook(pi as any);
+
+    const toolResultHandlers = pi._handlers.get("tool_result")!;
+
+    // Fire a todo completion
+    await toolResultHandlers[0]({
+      type: "tool_result",
+      toolName: "todo",
+      toolCallId: "t4",
+      isError: false,
+      input: { action: "update", status: "completed", subject: "First" },
+      content: [],
+      details: null,
+    }, {});
+
+    // First nudge — should contain the milestone
+    const agentHandler = getAgentEndHandler();
+    await agentHandler({}, {}); // distill
+    await agentHandler({}, {}); // end distill
+
+    // Second nudge (new user prompt) — should NOT contain the old milestone
+    await agentHandler({}, {}); // distill
+    await agentHandler({}, {}); // end distill
+
+    const calls = (pi.sendMessage as any).mock.calls;
+    const firstNudge = calls[0][0].content;
+    const secondNudge = calls[1][0].content;
+    expect(firstNudge).toContain("Notable this turn");
+    expect(secondNudge).not.toContain("Notable this turn");
+  });
+
+  it("no milestone prefix when journal is empty", async () => {
+    await fireAgentEnd(() => import("./distill"));
+
+    const call = (pi.sendMessage as any).mock.calls[0];
+    expect(call[0].content).not.toContain("Notable this turn");
+    // Should start directly with the normal nudge
+    expect(call[0].content).toContain("[memory] Distillation structural check");
   });
 });
