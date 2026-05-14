@@ -86,17 +86,28 @@
           sessionLogRoot = "/SET-VIA-HOME-MANAGER/session-log";
           knowledgeRoot = "/SET-VIA-HOME-MANAGER/knowledge";
         };
+
+        # pi memory extension — esbuild-bundled TypeScript plugin.
+        # Output: dist/index.js, symlinked into ~/.pi/agent/extensions/.
+        pi-memory-plugin = pkgs.callPackage ./pkgs/pi-memory-plugin.nix { };
       in
       {
         packages = {
-          inherit graphrag-rs memory-mcp knowledge-watcher claude-code-memory-plugin;
+          inherit graphrag-rs memory-mcp knowledge-watcher claude-code-memory-plugin pi-memory-plugin;
           graphrag-server = graphrag-rs.server;
           default = graphrag-rs.server;
         };
 
         devShells.default = pkgs.mkShell {
           inputsFrom = [ graphrag-rs.server memory-mcp knowledge-watcher ];
-          packages = with pkgs; [ nixpkgs-fmt nil rust-analyzer ];
+          packages = with pkgs; [
+            nixpkgs-fmt nil rust-analyzer
+            # TypeScript tooling for pi extension development
+            nodejs_22
+            esbuild
+            nodePackages.typescript
+            nodePackages.tsx
+          ];
         };
 
         formatter = pkgs.nixpkgs-fmt;
