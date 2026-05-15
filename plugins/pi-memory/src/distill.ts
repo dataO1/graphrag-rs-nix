@@ -170,6 +170,9 @@ export function registerDistillHook(pi: ExtensionAPI): void {
     } else if (existing === undefined || existing === null) {
       payload.system = systemInstr;
     }
+    // Must RETURN the mutated payload — the runner discards in-place
+    // mutations. Only handler return values replace the request.
+    return payload;
   });
 
   // ── agent_end: fire the nudge (main agent only — subagents skip via index.ts gate) ──
