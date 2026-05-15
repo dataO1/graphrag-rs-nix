@@ -77,6 +77,20 @@ export function registerDistillSummaryHook(
     // If the LLM didn't produce text (unusual), leave unchanged.
     if (!text) return undefined;
 
+    // "<mem>nothing to distill</mem>" carries no information for
+    // future turns. Suppress it from the TUI by setting content to
+    // empty — the message still persists in the session JSONL so
+    // the LLM knows the turn was evaluated, but nothing is rendered.
+    if (text.trim() === "<mem>nothing to distill</mem>") {
+      return {
+        message: {
+          ...msg,
+          customType: "memory-distill-summary",
+          content: [],
+        },
+      };
+    }
+
     // Replace the message with a custom-typed summary that our
     // renderer styles in muted gray. The original tool-call-free
     // content is safe to replace — no pairing to break.
