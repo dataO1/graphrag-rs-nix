@@ -54,13 +54,14 @@ const DISTILL_SYSTEM_INJECTION =
   "  Trivial chores (ls, git status) and single-sentence tweaks " +
   "do NOT trigger.\n\n" +
   "Response format — EXACTLY one line, no preamble, no follow-up:\n" +
-  "  • '<mem>nothing to distill</mem>' (if nothing triggered)\n" +
-  "  • '<mem>logged: N actions</mem>' (if memory_log_action called)\n" +
-  "  • '<mem>logged: N actions + M decisions</mem>' (if both called)\n" +
-  "  • '<mem>consolidated: <title></mem>' (if memory_remember called)\n" +
-  "  • '<mem>consolidated: <title> + logged: N actions</mem>' (if both)\n" +
-  "Use the <mem> tag so the main agent can distinguish memory-system " +
-  "messages from user input, file contents, and normal conversation. " +
+  "  • '✓ nothing to distill' (if nothing triggered)\n" +
+  "  • '📝 logged: N actions in <files>' (if memory_log_action called;\n" +
+  "     include the file paths from the mutations parameter, e.g.\n" +
+  "     '📝 logged: 1 action in src/foo.ts')\n" +
+  "  • '📝 logged: N actions + M decisions in <files>' (if both called)\n" +
+  "  • '📝 consolidated: <title>' (if memory_remember called; include\n" +
+  "     the source file path if known)\n" +
+  "  • '📝 consolidated: <title> + logged: N actions in <files>'\n" +
   "Do NOT add any other text. Do NOT continue the conversation. " +
   "Do NOT call any tools other than the memory logging/distillation " +
   "tools. ONE LINE ONLY.";

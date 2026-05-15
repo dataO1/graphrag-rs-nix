@@ -389,12 +389,12 @@ describe("registerDistillSummaryHook", () => {
       expect(result.message).toHaveProperty("customType", "memory-distill-summary");
     });
 
-    it("suppresses <mem>nothing to distill</mem> (empty content, invisible in TUI)", async () => {
+    it("suppresses ✓ nothing to distill (empty content, invisible in TUI)", async () => {
       distillMod.isDistillTurn = () => true;
 
       const result = await fireHook({
         role: "assistant",
-        content: [{ type: "text", text: "<mem>nothing to distill</mem>" }],
+        content: [{ type: "text", text: "✓ nothing to distill" }],
       });
 
       expect(result.message.content).toEqual([]);
