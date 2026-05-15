@@ -4,19 +4,15 @@
 // agent_end fires once per user prompt. We queue a forced follow-up
 // turn where the LLM MUST evaluate the previous turn for durable work.
 //
-// The nudge is sent via pi.sendMessage() with display:false so it
-// reaches the LLM context but doesn't render in the TUI chat viewport.
-// The LLM's compact reply (".", "logged", "consolidated+logged") flows
-// through intact — we never collapse message content (that would orphan
-// tool_use/tool_result blocks — pi-mono issue #4189).
+// The trigger is a MINIMAL sendMessage ("[memory] distill" — 5 tokens)
+// so the session history stays slim. All criteria live in the ephemeral
+// before_provider_request system-prompt injection — never persisted.
+// Only the one-liner reply (~5-20 tokens) enters the session JSONL.
 //
 // Milestone journal: tool_result hooks detect todo completions and
-// subagent finishes, storing lightweight references (id + subject, not
-// full content — the LLM already has the results in its KV cache).
-// These are injected into the agent_end nudge as a short reminder line
-// so the LLM sees "you had these notable events" without re-reading the
-// full tool output. Subagent sessions (PI_SUBAGENT_CHILD=1) are fully
-// skipped — subagents don't do their own logging.
+// subagent finishes, storing lightweight references. These are injected
+// into the before_provider_request system prompt (not the session).
+// Subagent sessions (PI_SUBAGENT_CHILD=1) are fully skipped.
 // ---------------------------------------------------------------------------
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -30,43 +26,42 @@ interface MilestoneEntry {
 const pendingMilestones: MilestoneEntry[] = [];
 
 export const DISTILL_NUDGE =
-  "[memory] Distillation structural check. Higher bar. Ask: 'Did " +
-  "this turn produce a finding / decision rationale / architectural " +
-  "insight / unexpected behavior fact that (a) a future session " +
-  "would genuinely benefit from being able to recall, (b) is NOT " +
-  "already covered in an existing entry in the user's recorded " +
-  "material, (c) is NOT derivable from current code or git log, " +
-  "and (d) is NOT a re-statement of intermediate scratch?' If YES " +
-  "— invoke `memory_remember` with an insight-oriented title. " +
-  "False-positive distillation noise is worse than missed real " +
-  "insights — when in doubt, skip.\n\n" +
-  "[memory] Logging structural check. Evaluate this turn (yours + " +
-  "any subagents you dispatched). If the turn produced one of: an " +
-  "architectural change, a bug fix, a non-trivial documentation " +
-  "write or edit (new file, restructured section, distilled " +
-  "findings — anything beyond a single-sentence tweak), a research " +
-  "finding, a decision taken, an unexpected outcome that changes " +
-  "the user's mental model, OR a completed user-facing deliverable " +
-  "(new file, code change, config edit) — INCLUDING work done by " +
-  "a subagent you dispatched — fire the matching tool BEFORE " +
-  "responding:\n" +
-  "  • `memory_log_action` for action / change / deliverable / " +
-  "finding rows\n" +
-  "  • `memory_log_decision` for decision rows (choice between " +
-  "alternatives with rationale, including rollout + rollback)\n" +
-  "If the turn produced both, fire both tools — one row each. " +
-  "Decisions live in the log, NOT as knowledge notes (temporal " +
-  "context is load-bearing). Single-sentence tweaks, read-only " +
-  "operations (recall/grep/read), and trivial chores (ls, git " +
-  "status) do NOT trigger.\n\n" +
-  "If nothing triggered: respond with exactly '✓ nothing to distill' (a single " +
-  "line, no preamble).\n" +
-  "If you called memory_remember: respond with '📝 consolidated: <title>' (use the " +
-  "title you passed to memory_remember).\n" +
-  "If you called memory_log_action or memory_log_decision: count them and respond " +
-  "with '📝 logged: N actions + M decisions' (omit zero counts, e.g. '📝 logged: 1 action').\n" +
-  "If you did both: '📝 consolidated: <title> + logged: N actions'.\n" +
-  "Keep it to ONE line, no preamble, no follow-up text.";
+  "[memory] distill — evaluate the previous turn for durable work (actions, decisions, findings).";
+
+// ── Distill system-prompt injection (ephemeral — never persisted) ─
+// Injected via before_provider_request into the distill turn's system
+// prompt. The LLM sees this ONCE per distill turn, at system-prompt
+// level. It never enters the session JSONL. Only the one-liner reply
+// (~5-20 tokens) persists.
+const DISTILL_SYSTEM_INJECTION =
+  "[system] You are in a distillation turn. Your ONLY task is to " +
+  "evaluate the previous turn for durable work.\n\n" +
+  "Distillation (higher bar — only genuine insights):\n" +
+  "  Did this turn produce a finding / decision rationale / " +
+  "architectural insight / unexpected behavior fact that (a) a " +
+  "future session would genuinely benefit from recalling, (b) is " +
+  "NOT already recorded, (c) is NOT derivable from code or git " +
+  "log, and (d) is NOT a re-statement of scratch?\n" +
+  "  If YES → call memory_remember with an insight-oriented title.\n" +
+  "  When in doubt, skip. False positives are worse than misses.\n\n" +
+  "Logging (session action/decision rows):\n" +
+  "  If the turn produced: an architectural change, bug fix, " +
+  "non-trivial doc edit, research finding, decision between " +
+  "alternatives with rationale, OR a completed user-facing " +
+  "deliverable (including work done by dispatched subagents)\n" +
+  "  → call memory_log_action (for actions/changes/findings)\n" +
+  "  → call memory_log_decision (for choices with rationale)\n" +
+  "  Trivial chores (ls, git status) and single-sentence tweaks " +
+  "do NOT trigger.\n\n" +
+  "Response format — EXACTLY one line, no preamble, no follow-up:\n" +
+  "  • '✓ nothing to distill' (if nothing triggered)\n" +
+  "  • '📝 logged: N actions' (if memory_log_action called)\n" +
+  "  • '📝 logged: N actions + M decisions' (if both called)\n" +
+  "  • '📝 consolidated: <title>' (if memory_remember called)\n" +
+  "  • '📝 consolidated: <title> + logged: N actions' (if both)\n" +
+  "Do NOT add any other text. Do NOT continue the conversation. " +
+  "Do NOT call any tools other than the memory logging/distillation " +
+  "tools. ONE LINE ONLY.";
 
 // ── Recursion guard state ─────────────────────────────────────────
 let forcedDistillTurn = false;
@@ -136,29 +131,20 @@ export function registerDistillHook(pi: ExtensionAPI): void {
     }
   });
 
-  // ── before_provider_request: system-level distill enforcement ──
-  // During the distill follow-up turn, inject a system-prompt-level
-  // instruction that forces the one-liner format. Inline nudge text
-  // is advisory — models focused on complex work often ignore it.
-  // System-prompt-level instructions are much harder to override.
+  // ── before_provider_request: ephemeral distill enforcement ──
+  // Injects the full criteria into the system prompt of the distill
+  // turn. This injection dies with the HTTP request — it never enters
+  // the session JSONL. Only the one-liner reply (~5-20 tokens) persists.
   pi.on("before_provider_request", async (event) => {
     if (!forcedDistillTurn) return;
     const payload = event.payload as Record<string, unknown>;
-    const systemInstr =
-      "[system] You are in a distillation turn. Your ONLY task is to " +
-      "evaluate the previous turn for durable work (actions, decisions, " +
-      "findings) and respond with EXACTLY one of:\n" +
-      "  • '✓ nothing to distill' (if nothing triggered)\n" +
-      "  • '📝 logged: N actions' (if memory_log_action called)\n" +
-      "  • '📝 logged: N actions + M decisions' (if both called)\n" +
-      "  • '📝 consolidated: <title>' (if memory_remember called)\n" +
-      "  • '📝 consolidated: <title> + logged: N actions' (if both)\n" +
-      "Do NOT add any other text. Do NOT continue the conversation. " +
-      "Do NOT call any tools other than the memory logging/distillation " +
-      "tools explicitly listed above. One line only.";
 
-    // Inject into system prompt. Pi's request shape has `system`
-    // as a string or array of content blocks — append to it.
+    // Prepend milestone journal (if any) to the system injection.
+    const prefix = buildMilestonePrefix();
+    const systemInstr = prefix + DISTILL_SYSTEM_INJECTION;
+
+    // Pi's request shape has `system` as a string or array of
+    // content blocks — append to it.
     const existing = payload.system;
     if (typeof existing === "string") {
       payload.system = existing + "\n\n" + systemInstr;
@@ -170,12 +156,12 @@ export function registerDistillHook(pi: ExtensionAPI): void {
     } else if (existing === undefined || existing === null) {
       payload.system = systemInstr;
     }
-    // Must RETURN the mutated payload — the runner discards in-place
-    // mutations. Only handler return values replace the request.
+    // Must RETURN the mutated payload — the runner chains return
+    // values, not in-place mutations.
     return payload;
   });
 
-  // ── agent_end: fire the nudge (main agent only — subagents skip via index.ts gate) ──
+  // ── agent_end: trigger the distill turn (minimal content) ──
   pi.on("agent_end", async (_event, ctx) => {
     if (forcedDistillTurn) {
       forcedDistillTurn = false;
@@ -190,15 +176,12 @@ export function registerDistillHook(pi: ExtensionAPI): void {
     savedDistillThinking = pi.getThinkingLevel();
     pi.setThinkingLevel("low");
 
-    // Prepend milestone journal (if any) to the standard nudge.
-    const prefix = buildMilestonePrefix();
-    const nudge = prefix + DISTILL_NUDGE;
-
-    // display:false → sent to LLM context, NOT rendered in chat
+    // Minimal trigger — 5 tokens. The full criteria are in the
+    // ephemeral before_provider_request system-prompt injection.
     pi.sendMessage(
       {
         customType: "memory-distill-nudge",
-        content: nudge,
+        content: DISTILL_NUDGE,
         display: false,
       },
       { triggerTurn: true },

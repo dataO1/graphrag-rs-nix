@@ -23,41 +23,17 @@ async function freshImport() {
 }
 
 describe("DISTILL_NUDGE", () => {
-  it("contains the structural check instructions", async () => {
+  it("is a minimal trigger (~5 tokens) — criteria live in injection", async () => {
     const { DISTILL_NUDGE } = await freshImport();
-    expect(DISTILL_NUDGE).toContain("Distillation structural check");
-    expect(DISTILL_NUDGE).toContain("memory_remember");
+    expect(DISTILL_NUDGE).toContain("[memory] distill");
+    expect(DISTILL_NUDGE.length).toBeLessThan(100); // minimal, not the old 500-token version
   });
 
-  it("contains the logging check instructions", async () => {
+  it("does NOT contain the full criteria (those are in the injection)", async () => {
     const { DISTILL_NUDGE } = await freshImport();
-    expect(DISTILL_NUDGE).toContain("Logging structural check");
-    expect(DISTILL_NUDGE).toContain("memory_log_action");
-    expect(DISTILL_NUDGE).toContain("memory_log_decision");
-  });
-
-  it("specifies the one-line response format", async () => {
-    const { DISTILL_NUDGE } = await freshImport();
-    expect(DISTILL_NUDGE).toContain("✓ nothing to distill");
-    expect(DISTILL_NUDGE).toContain("📝 consolidated:");
-    expect(DISTILL_NUDGE).toContain("📝 logged:");
-    expect(DISTILL_NUDGE).toContain("Keep it to ONE line");
-  });
-
-  it("has higher bar for distillation (a-d criteria)", async () => {
-    const { DISTILL_NUDGE } = await freshImport();
-    expect(DISTILL_NUDGE).toContain("(a)");
-    expect(DISTILL_NUDGE).toContain("(b)");
-    expect(DISTILL_NUDGE).toContain("(c)");
-    expect(DISTILL_NUDGE).toContain("(d)");
-    expect(DISTILL_NUDGE).toContain("when in doubt, skip");
-  });
-
-  it("has logging trigger criteria for subagent work", async () => {
-    const { DISTILL_NUDGE } = await freshImport();
-    expect(DISTILL_NUDGE).toContain(
-      "INCLUDING work done by a subagent you dispatched",
-    );
+    expect(DISTILL_NUDGE).not.toContain("Distillation structural check");
+    expect(DISTILL_NUDGE).not.toContain("Logging structural check");
+    expect(DISTILL_NUDGE).not.toContain("(a)");
   });
 });
 
@@ -228,8 +204,10 @@ describe("registerDistillHook", () => {
   });
 
   // ── Milestone journal tests ───────────────────────────────────
+  // Milestones are injected into the before_provider_request system
+  // prompt (ephemeral), not into the persisted sendMessage nudge.
 
-  it("journals todo completions via tool_result", async () => {
+  it("journals todo completions via tool_result, injects into provider request", async () => {
     const mod = await import("./distill");
     mod.registerDistillHook(pi as any);
 
@@ -247,17 +225,20 @@ describe("registerDistillHook", () => {
       details: null,
     }, {});
 
-    // Fire agent_end — should include milestone in nudge
+    // Fire agent_end to trigger distill
     const agentHandler = getAgentEndHandler();
     await agentHandler({}, {});
 
-    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
-    const call = (pi.sendMessage as any).mock.calls[0];
-    expect(call[0].content).toContain("[memory] Notable this turn:");
-    expect(call[0].content).toContain("Fix bug");
+    // The before_provider_request handler should inject the milestone
+    const providerHandlers = pi._handlers.get("before_provider_request")!;
+    expect(providerHandlers).toBeDefined();
+    const payload = { system: "base system prompt" };
+    const result = await providerHandlers[0]({ type: "before_provider_request", payload }, {});
+    expect(result.system).toContain("[memory] Notable this turn:");
+    expect(result.system).toContain("Fix bug");
   });
 
-  it("journals subagent completions via tool_result", async () => {
+  it("journals subagent completions via tool_result, injects into provider request", async () => {
     const mod = await import("./distill");
     mod.registerDistillHook(pi as any);
 
@@ -276,10 +257,11 @@ describe("registerDistillHook", () => {
     const agentHandler = getAgentEndHandler();
     await agentHandler({}, {});
 
-    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
-    const call = (pi.sendMessage as any).mock.calls[0];
-    expect(call[0].content).toContain("[memory] Notable this turn:");
-    expect(call[0].content).toContain("researcher: find hook patterns");
+    const providerHandlers = pi._handlers.get("before_provider_request")!;
+    const payload = { system: "base" };
+    const result = await providerHandlers[0]({ type: "before_provider_request", payload }, {});
+    expect(result.system).toContain("[memory] Notable this turn:");
+    expect(result.system).toContain("researcher: find hook patterns");
   });
 
   it("skips errored tool_results", async () => {
@@ -288,7 +270,6 @@ describe("registerDistillHook", () => {
 
     const toolResultHandlers = pi._handlers.get("tool_result")!;
 
-    // Errored subagent
     await toolResultHandlers[0]({
       type: "tool_result",
       toolName: "subagent",
@@ -302,17 +283,18 @@ describe("registerDistillHook", () => {
     const agentHandler = getAgentEndHandler();
     await agentHandler({}, {});
 
-    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
-    const call = (pi.sendMessage as any).mock.calls[0];
-    // Should NOT contain notable milestones (errored subagent skipped)
-    expect(call[0].content).not.toContain("Notable this turn");
+    const providerHandlers = pi._handlers.get("before_provider_request")!;
+    const payload = { system: "base" };
+    const result = await providerHandlers[0]({ type: "before_provider_request", payload }, {});
+    expect(result.system).not.toContain("Notable this turn");
   });
 
-  it("clears milestones after each nudge", async () => {
+  it("clears milestones after each distill turn", async () => {
     const mod = await import("./distill");
     mod.registerDistillHook(pi as any);
 
     const toolResultHandlers = pi._handlers.get("tool_result")!;
+    const providerHandlers = pi._handlers.get("before_provider_request")!;
 
     // Fire a todo completion
     await toolResultHandlers[0]({
@@ -325,28 +307,31 @@ describe("registerDistillHook", () => {
       details: null,
     }, {});
 
-    // First nudge — should contain the milestone
+    // First distill turn — should contain the milestone
     const agentHandler = getAgentEndHandler();
-    await agentHandler({}, {}); // distill
+    await agentHandler({}, {}); // start distill
+    const r1 = await providerHandlers[0]({ type: "before_provider_request", payload: { system: "base" } }, {});
+    expect(r1.system).toContain("Notable this turn");
     await agentHandler({}, {}); // end distill
 
-    // Second nudge (new user prompt) — should NOT contain the old milestone
-    await agentHandler({}, {}); // distill
+    // Second distill turn — should NOT contain the old milestone
+    await agentHandler({}, {}); // start distill
+    const r2 = await providerHandlers[0]({ type: "before_provider_request", payload: { system: "base" } }, {});
+    expect(r2.system).not.toContain("Notable this turn");
     await agentHandler({}, {}); // end distill
-
-    const calls = (pi.sendMessage as any).mock.calls;
-    const firstNudge = calls[0][0].content;
-    const secondNudge = calls[1][0].content;
-    expect(firstNudge).toContain("Notable this turn");
-    expect(secondNudge).not.toContain("Notable this turn");
   });
 
   it("no milestone prefix when journal is empty", async () => {
-    await fireAgentEnd(() => import("./distill"));
+    const mod = await import("./distill");
+    mod.registerDistillHook(pi as any);
 
-    const call = (pi.sendMessage as any).mock.calls[0];
-    expect(call[0].content).not.toContain("Notable this turn");
-    // Should start directly with the normal nudge
-    expect(call[0].content).toContain("[memory] Distillation structural check");
+    const agentHandler = getAgentEndHandler();
+    await agentHandler({}, {}); // start distill
+
+    const providerHandlers = pi._handlers.get("before_provider_request")!;
+    const result = await providerHandlers[0]({ type: "before_provider_request", payload: { system: "base" } }, {});
+    expect(result.system).not.toContain("Notable this turn");
+    // Should contain the system injection criteria
+    expect(result.system).toContain("distillation turn");
   });
 });
