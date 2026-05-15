@@ -136,6 +136,42 @@ export function registerDistillHook(pi: ExtensionAPI): void {
     }
   });
 
+  // ── before_provider_request: system-level distill enforcement ──
+  // During the distill follow-up turn, inject a system-prompt-level
+  // instruction that forces the one-liner format. Inline nudge text
+  // is advisory — models focused on complex work often ignore it.
+  // System-prompt-level instructions are much harder to override.
+  pi.on("before_provider_request", async (event) => {
+    if (!forcedDistillTurn) return;
+    const payload = event.payload as Record<string, unknown>;
+    const systemInstr =
+      "[system] You are in a distillation turn. Your ONLY task is to " +
+      "evaluate the previous turn for durable work (actions, decisions, " +
+      "findings) and respond with EXACTLY one of:\n" +
+      "  • '✓ nothing to distill' (if nothing triggered)\n" +
+      "  • '📝 logged: N actions' (if memory_log_action called)\n" +
+      "  • '📝 logged: N actions + M decisions' (if both called)\n" +
+      "  • '📝 consolidated: <title>' (if memory_remember called)\n" +
+      "  • '📝 consolidated: <title> + logged: N actions' (if both)\n" +
+      "Do NOT add any other text. Do NOT continue the conversation. " +
+      "Do NOT call any tools other than the memory logging/distillation " +
+      "tools explicitly listed above. One line only.";
+
+    // Inject into system prompt. Pi's request shape has `system`
+    // as a string or array of content blocks — append to it.
+    const existing = payload.system;
+    if (typeof existing === "string") {
+      payload.system = existing + "\n\n" + systemInstr;
+    } else if (Array.isArray(existing)) {
+      payload.system = [
+        ...existing,
+        { type: "text", text: systemInstr },
+      ];
+    } else if (existing === undefined || existing === null) {
+      payload.system = systemInstr;
+    }
+  });
+
   // ── agent_end: fire the nudge (main agent only — subagents skip via index.ts gate) ──
   pi.on("agent_end", async (_event, ctx) => {
     if (forcedDistillTurn) {
