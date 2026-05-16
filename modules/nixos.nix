@@ -383,7 +383,7 @@ let
     runtimeInputs = [ pullPyEnv pkgs.coreutils ];
     text = ''
       set -euo pipefail
-      MODELS_DIR="${cfg.stateDir}/ovms-models"
+      MODELS_DIR="''${GRS_MODELS_DIR:-${cfg.stateDir}/ovms-models}"
       STAMP_FILE="$MODELS_DIR/.graphrag-stamp"
       # Stamp includes the pull script's nix store path AND the python
       # env's path. Any change to either (script content, dep set, dep
@@ -724,7 +724,8 @@ in
       "d ${cfg.stateDir}/ovms-cache 0750 ${cfg.user} ${cfg.group} -"
     ] ++ lib.optionals cfg.queryNpu.enable [
       "d /var/lib/graphrag-rs-npu-query 0750 data01 users -"
-      "Z /var/lib/graphrag-rs-npu-query/ovms-models 0750 data01 users -"
+      "d /var/lib/graphrag-rs-npu-query/ovms-models 0750 data01 users -"
+      "d /var/lib/graphrag-rs-npu-query/ovms-cache 0750 data01 users -"
     ];
 
     # NPU kernel driver.
@@ -837,7 +838,7 @@ in
       ports = [ "127.0.0.1:9001:8000" ];
       volumes = [
         "/var/lib/graphrag-rs-npu-query/ovms-models:/models:ro"
-        "${cfg.stateDir}/ovms-cache:/cache:rw"
+        "/var/lib/graphrag-rs-npu-query/ovms-cache:/cache:rw"
       ];
       cmd = [ "--rest_port" "8000" "--config_path" "/models/config.json" ];
       extraOptions = [
