@@ -36,7 +36,6 @@ export default class GraphragGatewayPlugin extends Plugin {
 
   async onload() {
     await this.bootstrap();
-    this.registerVaultEvents();
     this.registerCommands();
     this.addSettingTab(new GraphragSettingTab(this.app, this));
     this.statusEl = this.addStatusBarItem();
@@ -57,6 +56,21 @@ export default class GraphragGatewayPlugin extends Plugin {
         `GraphRAG Gateway: port ${this.settings.gatewayPort} unavailable — vault watch still active.`,
       );
     }
+
+    // Defer vault event registration until after Obsidian's startup
+    // scan is done. Obsidian fires `create` for every existing file at
+    // boot ("newly loaded files are treated as 'created' at that
+    // time"), and we don't want to queue ~vault-size ingests on every
+    // launch. The 5 s grace lets other plugins (make.md, tasks,
+    // kanban, dataview, templater) finish their layout-ready frontmatter
+    // rewrites before we start observing — otherwise their writes
+    // surface to us as real modifies and we re-POST unchanged content.
+    this.app.workspace.onLayoutReady(() => {
+      window.setTimeout(() => {
+        this.registerVaultEvents();
+        this.log("vault watch armed (post layout-ready grace)");
+      }, 5_000);
+    });
 
     this.log("ready");
   }
@@ -207,8 +221,12 @@ export default class GraphragGatewayPlugin extends Plugin {
   }
 
   private scheduleStatePersist() {
+    // Short debounce: enough to coalesce a burst of ingests, small
+    // enough that a force-kill loses at most one ingest's worth of
+    // updated hashes (without persistence, those files re-ingest on
+    // the next boot).
     if (this.indexSaveTimer) clearTimeout(this.indexSaveTimer);
-    this.indexSaveTimer = setTimeout(() => void this.persistState(), 2000);
+    this.indexSaveTimer = setTimeout(() => void this.persistState(), 500);
   }
 
   private async persistState() {
