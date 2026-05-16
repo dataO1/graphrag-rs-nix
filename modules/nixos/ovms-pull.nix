@@ -64,7 +64,7 @@ let
       "nncf>=2.17"
     # Strip store path references from compiled extensions.
     # pip-installed wheels may embed RPATH via auditwheel.
-    find "$out" -type f -name '*.so' -exec ${pkgs.removeReferencesTo}/bin/remove-references-to -t ${pullPyEnv} {} \; 2>/dev/null || true
+    ${pkgs.removeReferencesTo}/bin/remove-references-to -t ${pullPyEnv} "$out"
   ''
   # FOD contract: zero references to other /nix/store paths.
   # postBuild verifies; if something leaks a store path into
