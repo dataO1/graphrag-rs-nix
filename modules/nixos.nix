@@ -388,7 +388,7 @@ let
       # Stamp includes the pull script's nix store path AND the python
       # env's path. Any change to either (script content, dep set, dep
       # versions) → new store hash → invalidated stamp → rebuild.
-      STAMP="model=${cfg.embeddingModel} seq=${toString cfg.embeddingMaxSeqLen} pool=${cfg.embeddingPooling} dev=${cfg.embeddingDevice}${rerankerStampPart} script=${pullPyScript} env=${pullPyEnv} extras=${pullPyExtras}"
+      STAMP="model=''${GRS_MODEL:-${cfg.embeddingModel}} seq=''${GRS_SEQ_LEN:-${toString cfg.embeddingMaxSeqLen}} pool=''${GRS_POOLING:-${cfg.embeddingPooling}} dev=''${GRS_DEVICE:-${cfg.embeddingDevice}}${rerankerStampPart} script=${pullPyScript} env=${pullPyEnv} extras=${pullPyExtras}"
 
       mkdir -p "$MODELS_DIR"
 
@@ -437,8 +437,8 @@ let
         GRS_MODEL="${cfg.embeddingModel}" \
         GRS_SEQ_LEN="${toString cfg.embeddingMaxSeqLen}" \
         GRS_POOLING="${cfg.embeddingPooling}" \
-        GRS_DEVICE="${cfg.embeddingDevice}" \
-        GRS_RERANKER_MODEL="${if cfg.reranker.enable then cfg.reranker.model else ""}" \
+        GRS_DEVICE="''${GRS_DEVICE:-${cfg.embeddingDevice}}" \
+        GRS_RERANKER_MODEL="''${GRS_RERANKER_MODEL:-${if cfg.reranker.enable then cfg.reranker.model else ""}}" \
         GRS_RERANKER_SEQ_LEN="${toString cfg.reranker.maxSeqLen}" \
         GRS_RERANKER_DEVICE="${cfg.reranker.device}" \
         GRS_RERANKER_NUM_STREAMS="${toString cfg.reranker.numStreams}" \
