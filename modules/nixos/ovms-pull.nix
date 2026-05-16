@@ -41,6 +41,7 @@ let
     nativeBuildInputs = [ pullPyEnv pkgs.cacert ];
     outputHash = "";
     outputHashAlgo = "sha256";
+    outputHashMode = "recursive";
   } ''
     # install into $out
     mkdir -p $out
