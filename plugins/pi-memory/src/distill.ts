@@ -55,13 +55,12 @@ const DISTILL_SYSTEM_INJECTION =
   "do NOT trigger.\n\n" +
   "Response format — EXACTLY one line, no preamble, no follow-up:\n" +
   "  • '✓ nothing to distill' (if nothing triggered)\n" +
-  "  • '📝 logged: N actions in <files>' (if memory_log_action called;\n" +
-  "     include the file paths from the mutations parameter, e.g.\n" +
-  "     '📝 logged: 1 action in src/foo.ts')\n" +
-  "  • '📝 logged: N actions + M decisions in <files>' (if both called)\n" +
-  "  • '📝 consolidated: <title>' (if memory_remember called; include\n" +
-  "     the source file path if known)\n" +
-  "  • '📝 consolidated: <title> + logged: N actions in <files>'\n" +
+  "  • '📝 logged: N actions (<1-5 word summary of each>)'\n" +
+  "     (if memory_log_action called; use the 'actions' field to\n" +
+  "     produce a compact summary)\n" +
+  "  • '📝 logged: N actions + M decisions' (if both called)\n" +
+  "  • '📝 consolidated: <title>' (if memory_remember called)\n" +
+  "  • '📝 consolidated: <title> + logged: N actions' (if both)\n" +
   "Do NOT add any other text. Do NOT continue the conversation. " +
   "Do NOT call any tools other than the memory logging/distillation " +
   "tools. ONE LINE ONLY.";
