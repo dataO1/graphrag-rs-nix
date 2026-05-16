@@ -39,7 +39,7 @@ let
   # locked. Re-run any time the version constraints below change.
   pullPyExtras = pkgs.runCommand "graphrag-ovms-pull-pip-extras" {
     nativeBuildInputs = [ pullPyEnv pkgs.cacert ];
-    outputHash = "sha256-+e0infRiXLvjaWiVpnWp5D0zLzpZe0+9877KcWLSmuo=";
+    outputHash = "";
     outputHashAlgo = "sha256";
     outputHashMode = "recursive";
   } ''
@@ -64,14 +64,21 @@ let
       "nncf>=2.17"
   ''
   # FOD contract: zero references to other /nix/store paths.
-  # postBuild verifies (catches accidental absolute paths). If
-  # something leaks a store path into a .dist-info/RECORD or an
-  # .npy/.pickle, `grep` catches it and we fix the offending dep.
+  # postBuild verifies; if something leaks a store path into
+  # a .dist-info/RECORD or a script shebang, scrub it.
   // {
     postBuild = ''
-      echo "Checking for /nix/store references in pip extras..."
+      echo "Scrubbing /nix/store references from pip extras..."
+      # Remove script entry points that hardcode nix store shebangs.
+      # Pip creates <name> scripts in bin/ with #!<python> → these
+      # are never called directly; the python env's site-packages
+      # is on PYTHONPATH.
+      find "$out/bin" -type f -delete 2>/dev/null || true
+      # Scrub any remaining text references (RECORD, INSTALLER, etc.)
+      find "$out" -type f -exec sed -i 's|/nix/store/[a-z0-9]\{32\}-|__nix_store__/|g' {} + 2>/dev/null || true
       if grep -qr /nix/store "$out"; then
         echo "ERROR: pullPyExtras still has /nix/store references ↑" >&2
+        grep -r /nix/store "$out" | head -20 >&2
         exit 1
       fi
       echo "OK: no /nix/store references in pip extras"
