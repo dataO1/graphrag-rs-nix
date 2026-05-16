@@ -38,7 +38,7 @@ let
   # build fails with the real hash; copy it into outputHash, rebuild,
   # locked. Re-run any time the version constraints below change.
   pullPyExtras = pkgs.runCommand "graphrag-ovms-pull-pip-extras" {
-    nativeBuildInputs = [ pullPyEnv pkgs.cacert ];
+    nativeBuildInputs = [ pullPyEnv pkgs.cacert pkgs.removeReferencesTo ];
     outputHash = "";
     outputHashAlgo = "sha256";
     outputHashMode = "recursive";
@@ -62,23 +62,18 @@ let
       --no-compile \
       "openvino-tokenizers>=2025.2,<2026.3" \
       "nncf>=2.17"
+    # Strip store path references from compiled extensions.
+    # pip-installed wheels may embed RPATH via auditwheel.
+    find "$out" -type f -name '*.so' -exec ${pkgs.removeReferencesTo}/bin/remove-references-to -t ${pullPyEnv} {} \; 2>/dev/null || true
   ''
   # FOD contract: zero references to other /nix/store paths.
   # postBuild verifies; if something leaks a store path into
   # a .dist-info/RECORD or a script shebang, scrub it.
   // {
     postBuild = ''
-      echo "Scrubbing /nix/store references from pip extras..."
-      # Remove script entry points that hardcode nix store shebangs.
-      # Pip creates <name> scripts in bin/ with #!<python> → these
-      # are never called directly; the python env's site-packages
-      # is on PYTHONPATH.
-      find "$out/bin" -type f -delete 2>/dev/null || true
-      # Scrub any remaining text references (RECORD, INSTALLER, etc.)
-      find "$out" -type f -exec sed -i 's|/nix/store/[a-z0-9]\{32\}-|__nix_store__/|g' {} + 2>/dev/null || true
+      echo "Checking for /nix/store references in pip extras..."
       if grep -qr /nix/store "$out"; then
         echo "ERROR: pullPyExtras still has /nix/store references ↑" >&2
-        grep -r /nix/store "$out" | head -20 >&2
         exit 1
       fi
       echo "OK: no /nix/store references in pip extras"
