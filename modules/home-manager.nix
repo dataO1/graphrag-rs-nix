@@ -104,6 +104,9 @@ let
       max_input_chars = cfg.synthesis.maxInputChars;
       max_chars_per_chunk = cfg.synthesis.maxCharsPerChunk;
       skeleton_reserve_chars = cfg.synthesis.skeletonReserveChars;
+      max_answer_tokens = cfg.synthesis.maxAnswerTokens;
+      prompt_template = cfg.synthesis.promptTemplate;
+      top_chunks = cfg.synthesis.topChunks;
     };
   };
 
@@ -955,13 +958,15 @@ in
 
       maxCharsPerChunk = lib.mkOption {
         type = lib.types.int;
-        default = 2000;
+        default = 1200;
         description = ''
           Per-chunk char cap inside the SOURCE TEXT block. Truncates
           outliers so a single very long chunk doesn't consume the
-          whole budget at the expense of breadth. ~500 tokens per
+          whole budget at the expense of breadth. ~300 tokens per
           chunk at a typical chat-model tokenizer; raise for
           long-context models, lower for tighter contexts.
+          (Default changed from 2000 to 1200 in Card 6 to give more
+          breadth across topChunks with the same prompt budget.)
         '';
       };
 
@@ -975,6 +980,84 @@ in
           time is `maxInputChars - skeletonReserveChars`. Raise for
           recalls that consistently expand to many entities/edges;
           lower if you've shortened the synthesis prompt.
+        '';
+      };
+
+      maxAnswerTokens = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 300;
+        description = ''
+          Cap on `num_predict` / `max_tokens` for the synthesis LLM
+          call. The recall-synthesis prompt asks for a single direct
+          paragraph (four sentences or fewer), so 300 tokens is
+          generous; raise for longer multi-paragraph answers, lower
+          to reduce cost + latency on small models.
+
+          Passed as `synthesis.max_answer_tokens` in the POSTed
+          pipeline config. graphrag-core honours it by setting the
+          matching completion field; backends that ignore
+          `num_predict` / `max_tokens` (some hosted APIs) treat this
+          as advisory.
+        '';
+      };
+
+      promptTemplate = lib.mkOption {
+        type = lib.types.lines;
+        default = ''
+          You are a knowledge-graph QA assistant.
+
+          Use only the entities, relationships, and source text below.
+          Synthesize across all three sections — relationships often supply
+          the connective tissue between entities.
+          Write a single direct paragraph, four sentences or fewer.
+          Lead with the entity-to-entity bridge that answers the question.
+          If the context is insufficient, reply exactly:
+          "I don't have enough information to answer this question."
+
+          CONTEXT:
+          {{context}}
+
+          QUESTION: {{query}}
+
+          ANSWER:
+        '';
+        description = ''
+          Synthesis prompt template. Must contain at least one of the
+          two placeholders:
+            {{context}} — replaced with the assembled ENTITIES,
+                          RELATIONSHIPS, and SOURCE TEXT blocks.
+            {{query}}   — replaced with the user's query string.
+
+          Both are required for a useful answer; the assertion below
+          fires (at module evaluation time) if both are absent.
+
+          The default mirrors `DEFAULT_SYNTHESIS_PROMPT` in
+          graphrag-core (commit b0573ea). Override to steer tone,
+          length, or citation style — e.g. shorter system context for
+          small models, structured JSON output, or language-specific
+          instruction sets.
+
+          Uses `lib.types.lines` so multi-line values work without
+          escaping; trailing newlines are normalised by Nix's
+          indented-string semantics.
+        '';
+      };
+
+      topChunks = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 8;
+        description = ''
+          Cap on the number of source-text chunks included in the
+          synthesis context (`synthesis.top_chunks` in the POSTed
+          pipeline config). graphrag-core ranks chunks by relevance
+          and takes the top N before assembling the `{{context}}`
+          block.
+
+          8 (default, changed from the previous uncapped behavior in
+          Card 6) keeps the prompt compact enough for mid-range
+          chat models (8k–32k context). Raise to 12–16 for
+          long-context models; lower to 4–6 for very small models
+          or latency-sensitive deployments.
         '';
       };
     };
@@ -1232,7 +1315,27 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf cfg.enable (lib.mkMerge [
+    {
+      assertions = [
+        {
+          # Mirror graphrag-core's validator (Card 2): reject only when BOTH
+          # placeholders are absent — having at least one keeps the template
+          # functional enough for the server to accept it. The graphrag-core
+          # validator will catch deeper semantic issues at runtime.
+          assertion =
+            lib.hasInfix "{{context}}" cfg.synthesis.promptTemplate
+            || lib.hasInfix "{{query}}" cfg.synthesis.promptTemplate;
+          message = ''
+            services.graphrag-rs.synthesis.promptTemplate must contain at
+            least one of the placeholders {{context}} or {{query}}.
+            Both are recommended for a useful synthesis answer; with neither,
+            graphrag-core will reject the template at runtime.
+          '';
+        }
+      ];
+    }
+    {
     home.packages = lib.mkIf cfg.installMcp [ cfg.mcpPackage ];
 
     xdg.configFile."memory-mcp/mcp.json".source = mcpClientConfig;
@@ -1351,5 +1454,6 @@ in
         WantedBy = [ "default.target" ];
       };
     };
-  };
+    }
+  ]);
 }
