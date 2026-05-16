@@ -39,7 +39,7 @@ let
   # locked. Re-run any time the version constraints below change.
   pullPyExtras = pkgs.runCommand "graphrag-ovms-pull-pip-extras" {
     nativeBuildInputs = [ pullPyEnv pkgs.cacert ];
-    outputHash = "";
+    outputHash = "sha256-+e0infRiXLvjaWiVpnWp5D0zLzpZe0+9877KcWLSmuo=";
     outputHashAlgo = "sha256";
     outputHashMode = "recursive";
   } ''
