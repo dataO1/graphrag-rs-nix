@@ -17,7 +17,7 @@ let
   inherit (lib) optionalString concatMapStringsSep mapAttrs' nameValuePair optionalAttrs;
 
   cfg = config.services.graphrag-rs-npu;
-  pull = import ./nixos/ovms-pull.nix { inherit pkgs lib cfg; };
+  pull = import ./ovms-pull.nix { inherit pkgs lib cfg; };
 in
 {
   options.services.graphrag-rs-npu = {
