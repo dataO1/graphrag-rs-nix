@@ -61,6 +61,8 @@ let
     } // lib.optionalAttrs (cfg.embedding.backend == "openai") {
       api_endpoint = cfg.embedding.openai.url;
       model = cfg.embedding.openai.model;
+    } // lib.optionalAttrs (cfg.embedding.backend == "openai" && cfg.embedding.openai.queryUrl != null) {
+      query_api_endpoint = cfg.embedding.openai.queryUrl;
     } // lib.optionalAttrs (cfg.embedding.backend == "openai" && cfg.embedding.openai.apiKey != "") {
       api_key = cfg.embedding.openai.apiKey;
     } // lib.optionalAttrs (cfg.embedding.backend == "ollama") {
@@ -190,6 +192,8 @@ let
     GRAPHRAG_HOST = cfg.host;
     GRAPHRAG_PORT = toString cfg.port;
     RUST_LOG = cfg.logLevel;
+  } // lib.optionalAttrs (cfg.embedding.openai.queryUrl != null) {
+    OPENAI_QUERY_URL = cfg.embedding.openai.queryUrl;
   } // staleContextEnvVars // ingestEnvVars // cfg.environment;
 
   mcpClientConfig = pkgs.writeText "memory-mcp.json" (builtins.toJSON {
@@ -364,6 +368,18 @@ in
               - http://127.0.0.1:9000/v3     OpenVINO Model Server (services.graphrag-rs-npu)
               - http://127.0.0.1:17171/v1    llama-server with --embedding
               - https://api.openai.com/v1    real OpenAI
+          '';
+        };
+        queryUrl = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = ''
+            Optional separate embedding endpoint for query-time calls only.
+            When set, graphrag-server routes interactive recall embeddings
+            here (typically a low-latency NPU backend) while bulk extraction
+            continues to use `url` (typically a batched iGPU backend).
+            Maps to `embeddings.query_api_endpoint` in the pipeline config
+            and `OPENAI_QUERY_URL` env var. Null = queries share `url`.
           '';
         };
         waitForReady = lib.mkOption {
