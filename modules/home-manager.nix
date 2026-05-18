@@ -202,7 +202,9 @@ let
     # server treats an empty map as "no kinds configured" (not an
     # error). Keys are camelCase to match the server's
     # `serde(rename_all = "camelCase")` on KindConfig.
-    RECALL_KINDS_JSON = builtins.toJSON cfg.recall.kinds;
+    # systemd's Environment= directive strips unquoted " chars; escape them so
+    # the running process sees the literal JSON value.
+    RECALL_KINDS_JSON = lib.replaceStrings ["\""] ["\\\""] (builtins.toJSON cfg.recall.kinds);
   } // staleContextEnvVars // ingestEnvVars // cfg.environment;
 
   mcpClientConfig = pkgs.writeText "memory-mcp.json" (builtins.toJSON {
