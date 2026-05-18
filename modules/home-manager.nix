@@ -200,8 +200,12 @@ let
   } // {
     # Recall kinds taxonomy. Empty attrset serialises to "{}"; the
     # server treats an empty map as "no kinds configured" (not an
-    # error). Keys are camelCase to match the server's
-    # `serde(rename_all = "camelCase")` on KindConfig.
+    # error).
+    #
+    # Field-name mapping: KindEntry uses plain snake_case (path_prefix,
+    # default_mode, half_life_days). The Nix options use camelCase for
+    # ergonomics; we remap here before serialising to JSON.
+    #
     # systemd's Environment= directive has two hazards with embedded JSON:
     #   1. Unquoted " chars are parsed as quoted-substring delimiters and stripped.
     #   2. \n sequences (JSON-encoded newlines) are expanded to real newlines by
@@ -212,7 +216,17 @@ let
     # ", so the running process sees valid JSON.
     RECALL_KINDS_JSON =
       let
-        json = builtins.toJSON cfg.recall.kinds;
+        toSnake = entry: {
+          path_prefix = entry.pathPrefix;
+          default_mode = entry.defaultMode;
+          explanation = entry.explanation;
+          recency = {
+            enable = entry.recency.enable;
+            half_life_days = entry.recency.halfLifeDays;
+          };
+        };
+        snakeKinds = lib.mapAttrs (_name: toSnake) cfg.recall.kinds;
+        json = builtins.toJSON snakeKinds;
         noNewlines = lib.replaceStrings [ "\\n" ] [ " " ] json;
         escapedQuotes = lib.replaceStrings [ "\"" ] [ "\\\"" ] noNewlines;
       in
