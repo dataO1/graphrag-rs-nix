@@ -202,9 +202,19 @@ let
     # server treats an empty map as "no kinds configured" (not an
     # error). Keys are camelCase to match the server's
     # `serde(rename_all = "camelCase")` on KindConfig.
-    # systemd's Environment= directive strips unquoted " chars; escape them so
-    # the running process sees the literal JSON value.
-    RECALL_KINDS_JSON = lib.replaceStrings ["\""] ["\\\""] (builtins.toJSON cfg.recall.kinds);
+    # systemd's Environment= directive has two hazards with embedded JSON:
+    #   1. Unquoted " chars are parsed as quoted-substring delimiters and stripped.
+    #   2. \n sequences (JSON-encoded newlines) are expanded to real newlines by
+    #      systemd, splitting the assignment and producing invalid JSON.
+    # Fix: escape every " as \" so systemd round-trips them correctly, and
+    # collapse every \n (from multi-line Nix strings in e.g. `explanation`)
+    # to a single space — the server only reads the text, not the whitespace.
+    RECALL_KINDS_JSON =
+      let
+        json = builtins.toJSON cfg.recall.kinds;
+        noNewlines = lib.replaceStrings [ "\\n" ] [ " " ] json;
+      in
+        lib.replaceStrings [ "\"" ] [ "\\\"" ] noNewlines;
   } // staleContextEnvVars // ingestEnvVars // cfg.environment;
 
   mcpClientConfig = pkgs.writeText "memory-mcp.json" (builtins.toJSON {
