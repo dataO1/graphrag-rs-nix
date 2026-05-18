@@ -206,15 +206,17 @@ let
     #   1. Unquoted " chars are parsed as quoted-substring delimiters and stripped.
     #   2. \n sequences (JSON-encoded newlines) are expanded to real newlines by
     #      systemd, splitting the assignment and producing invalid JSON.
-    # Fix: escape every " as \" so systemd round-trips them correctly, and
-    # collapse every \n (from multi-line Nix strings in e.g. `explanation`)
-    # to a single space — the server only reads the text, not the whitespace.
+    # Fix: collapse \n to a space (explanation is human-readable; whitespace is
+    # safe), escape every " as \", then wrap the entire value in double-quotes.
+    # Systemd's quoted-string parsing then round-trips every \" back to a literal
+    # ", so the running process sees valid JSON.
     RECALL_KINDS_JSON =
       let
         json = builtins.toJSON cfg.recall.kinds;
         noNewlines = lib.replaceStrings [ "\\n" ] [ " " ] json;
+        escapedQuotes = lib.replaceStrings [ "\"" ] [ "\\\"" ] noNewlines;
       in
-        lib.replaceStrings [ "\"" ] [ "\\\"" ] noNewlines;
+        "\"" + escapedQuotes + "\"";
   } // staleContextEnvVars // ingestEnvVars // cfg.environment;
 
   mcpClientConfig = pkgs.writeText "memory-mcp.json" (builtins.toJSON {
