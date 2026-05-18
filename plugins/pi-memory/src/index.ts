@@ -18,6 +18,9 @@ import { registerStatus } from "./tools/status";
 import { registerLogAction } from "./tools/log_action";
 import { registerLogDecision } from "./tools/log_decision";
 
+// Kinds: boot-time fetch of /recall/kinds
+import { fetchRecallKinds } from "./kinds";
+
 // Hooks
 import { registerDistillHook } from "./distill";
 import { registerDistillSummaryRenderer, registerDistillSummaryHook } from "./hooks/message_end_distill";
@@ -32,7 +35,14 @@ import { registerCommands } from "./hooks/commands";
 // NEVER run distillation/logging — the main agent handles all writes.
 const isSubagent = process.env.PI_SUBAGENT_CHILD === "1";
 
-export default function (pi: ExtensionAPI): void {
+export default async function (pi: ExtensionAPI): Promise<void> {
+  // ── Boot-time fetch: /recall/kinds ────────────────────────────
+  // Must complete before registerRecall() so the tool description
+  // includes the TYPE section (if kinds are configured). On failure
+  // after retries, kinds fetch logs a warning and we continue with
+  // graceful degradation (no type param, no TYPE section).
+  await fetchRecallKinds();
+
   // ── Read tools (available in both main and subagent sessions) ──
   registerRecall(pi);
   registerCatalog(pi);

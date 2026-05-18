@@ -15,8 +15,10 @@ import {
   recallOutcomeLine,
 } from "../ui";
 import { getMemoryState } from "../sse";
+import { getTypeSection } from "../kinds";
 
 export function registerRecall(pi: ExtensionAPI) {
+  const typeSection = getTypeSection();
   pi.registerTool({
     name: "memory_recall",
     label: "recall",
@@ -29,7 +31,8 @@ export function registerRecall(pi: ExtensionAPI) {
       "Time/history filters (use whenever the user references time):\n" +
       "  • `asOf` — RFC 3339; only consider entries valid at-or-after this time.\n" +
       "  • `maxVersionsPerDoc` — defaults to 1 (current only). ≥2 for diff-style questions.\n\n" +
-      "PARALLELISE — independent recall questions go in one tool-call batch. Sequential is wasted wall-clock time.",
+      "PARALLELISE — independent recall questions go in one tool-call batch. Sequential is wasted wall-clock time." +
+      typeSection,
     promptSnippet:
       "memory_recall — first action when the user's question depends on long-term memory; excerpt IS the answer; absolutePath is the only safe filesystem input. Modes: default|quick. reason=true for multi-hop. SAFE TO PARALLELISE.",
     promptGuidelines: [
@@ -85,6 +88,23 @@ export function registerRecall(pi: ExtensionAPI) {
             "Per source doc, how many recent versions to consider. 1 = current only (default). Set ≥2 for diff-style questions ('what changed in X').",
         }),
       ),
+      // type / recencyBoost are always present in the schema but only
+      // meaningful when kinds are configured (typeSection non-empty).
+      // The TYPE section in the description carries the operator-defined
+      // kind names; when no kinds are configured the params are silently
+      // accepted but the server will reject unknown sourceKind values (400).
+      type: Type.Optional(
+        Type.String({
+          description:
+            "Kind filter: restricts recall to documents of this kind. See the TYPE section in the tool description for available kinds.",
+        }),
+      ),
+      recencyBoost: Type.Optional(
+        Type.Boolean({
+          description:
+            "Override the kind's default recency-rerank setting. true = apply recency decay; false = disable it.",
+        }),
+      ),
     }),
     executionMode: "parallel",
     renderCall: (args, theme, ctx) => {
@@ -112,7 +132,9 @@ export function registerRecall(pi: ExtensionAPI) {
           topK,
           asOf,
           maxVersionsPerDoc,
-        } = params;
+          type: sourceKind,
+          recencyBoost,
+        } = params as Record<string, any>;
         const agentMode = mode ?? "default";
         const serverMode =
           reason || agentMode === "default"
@@ -129,6 +151,10 @@ export function registerRecall(pi: ExtensionAPI) {
         if (asOf) body.asOf = asOf;
         if (maxVersionsPerDoc && maxVersionsPerDoc > 1)
           body.maxVersionsPerDoc = maxVersionsPerDoc;
+        if (sourceKind !== undefined && sourceKind !== null)
+          body.sourceKind = sourceKind;
+        if (recencyBoost !== undefined && recencyBoost !== null)
+          body.recencyBoost = recencyBoost;
         const ms = getMemoryState();
         if (ms?.sessionId) body.sessionId = ms.sessionId;
 

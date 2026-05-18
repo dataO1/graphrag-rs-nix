@@ -9,6 +9,14 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+// Mock kinds module so fetchRecallKinds() resolves instantly (no network).
+// This is hoisted before import so the dynamic import in loadPlugin sees it.
+vi.mock("./kinds", () => ({
+  fetchRecallKinds: async () => {},
+  getTypeSection: () => "",
+  getKinds: () => null,
+}));
+
 // ── Helpers ──────────────────────────────────────────────────────
 
 /** Load index.ts with a fresh module cache and the given PI_SUBAGENT_CHILD value. */
@@ -50,7 +58,8 @@ async function loadPlugin(subagentChild: string | undefined) {
   };
 
   const mod = await import("./index");
-  mod.default(mockPi);
+  // default export is now async (awaits fetchRecallKinds before registering tools).
+  await mod.default(mockPi);
 
   return { tools, hooks, renderers, commandCount };
 }
