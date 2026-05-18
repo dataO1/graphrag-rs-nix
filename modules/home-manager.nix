@@ -197,6 +197,12 @@ let
     RUST_LOG = cfg.logLevel;
   } // lib.optionalAttrs (cfg.embedding.openai.queryUrl != null) {
     OPENAI_QUERY_URL = cfg.embedding.openai.queryUrl;
+  } // {
+    # Recall kinds taxonomy. Empty attrset serialises to "{}"; the
+    # server treats an empty map as "no kinds configured" (not an
+    # error). Keys are camelCase to match the server's
+    # `serde(rename_all = "camelCase")` on KindConfig.
+    RECALL_KINDS_JSON = builtins.toJSON cfg.recall.kinds;
   } // staleContextEnvVars // ingestEnvVars // cfg.environment;
 
   mcpClientConfig = pkgs.writeText "memory-mcp.json" (builtins.toJSON {
@@ -1204,6 +1210,126 @@ in
       '';
     };
 
+    # ---------- Recall kinds taxonomy ----------
+    # Operator-defined taxonomy of document kinds for type-filtered
+    # recall queries. Each kind maps a `pathPrefix` to retrieval
+    # parameters (defaultMode, recency weighting, and a human-readable
+    # explanation surfaced in the recall tool description).
+    #
+    # Serialised as RECALL_KINDS_JSON env var (JSON-encoded attrset) on
+    # the graphrag-rs.service unit. The server parses it at startup via
+    # KindsConfig::from_env() (serde rename_all = "camelCase"). Attr
+    # names MUST match the serde wire names: pathPrefix, halfLifeDays,
+    # defaultMode, etc. — confirmed camelCase throughout.
+    #
+    # Empty attrset (the default) → RECALL_KINDS_JSON="{}" → server
+    # starts with no kinds configured. Any recall with sourceKind set
+    # returns 400; untyped recall is unaffected.
+    recall = {
+      kinds = lib.mkOption {
+        type = lib.types.attrsOf (lib.types.submodule {
+          options = {
+            pathPrefix = lib.mkOption {
+              type = lib.types.str;
+              description = ''
+                Absolute filesystem path prefix used to classify documents
+                into this kind. The server performs a longest-prefix match
+                on each document's resolved absolute path; the longest
+                matching kind wins.
+
+                Must start with "/" — enforced by an eval-time assertion.
+              '';
+            };
+
+            recency = {
+              enable = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = ''
+                  Whether to apply recency reranking for this kind.
+                  Formula: `score *= 0.5 ^ (age_days / halfLifeDays)`.
+                  Applied after vector/PPR chunk selection, before LLM
+                  synthesis (for hipporag mode, also used to re-order the
+                  chunk context window).
+                '';
+              };
+              halfLifeDays = lib.mkOption {
+                type = lib.types.ints.positive;
+                default = 365;
+                description = ''
+                  Half-life for the recency decay in days. A chunk aged
+                  `halfLifeDays` days gets half its base score; a chunk
+                  aged `2×halfLifeDays` gets a quarter.
+
+                  Default 365 (mild decay). Use shorter values (e.g. 90)
+                  for kinds where very recent content should dominate
+                  strongly (e.g. daily notes); longer values (e.g. 730)
+                  to preserve older content.
+                '';
+              };
+            };
+
+            defaultMode = lib.mkOption {
+              type = lib.types.enum [ "search" "hipporag" ];
+              default = "hipporag";
+              description = ''
+                Default retrieval mode for queries against this kind.
+                "hipporag" uses PPR-weighted graph traversal (better for
+                multi-hop entity reasoning); "search" is pure vector cosine
+                (better for recent/temporal/log queries where entities are
+                sparse). Overridable per-call by the agent.
+              '';
+            };
+
+            explanation = lib.mkOption {
+              type = lib.types.str;
+              description = ''
+                Human-readable explanation injected into the recall tool
+                description. Tells the agent when to use this kind. Keep
+                it ≤ 2000 chars and non-empty (server validates).
+              '';
+            };
+          };
+        });
+        default = { };
+        description = ''
+          Recall kinds taxonomy for type-filtered queries. Each attribute
+          name becomes a valid `sourceKind` value on `POST /api/query`.
+
+          The server exposes the live taxonomy via `GET /recall/kinds`;
+          memory-mcp and the pi extension fetch it at boot and template
+          the kind explanations into the recall tool description so agents
+          know when to use each kind.
+
+          After changing this option, a `home-manager switch` re-renders
+          RECALL_KINDS_JSON and restarts graphrag-rs.service. The server
+          then auto-runs a background backfill to reclassify all existing
+          Qdrant points by the new taxonomy (visible via
+          `/health.kindsBackfill`).
+        '';
+      };
+
+      adminEndpointEnable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Advisory option documenting operator intent to expose
+          `POST /api/admin/backfill-kinds`. The server always mounts
+          this route; because graphrag-rs binds exclusively on
+          `127.0.0.1` (see `host` option), the endpoint is
+          loopback-only regardless of this flag — no firewall change
+          is required or performed.
+
+          This option is currently a no-op. It is wired here for
+          forward-compatibility: if a future server release adds a
+          flag to gate the admin routes, this option becomes the
+          lever. Set to `true` to document that you intentionally
+          want the backfill endpoint reachable (even though it is
+          already loopback-only).
+        '';
+      };
+    };
+
     # ---------- Stale-context awareness (event log + lease + SSE) ----
     # Server-pushed notifications about block changes filtered per
     # session's lease table. SQLite-backed event log lives at
@@ -1333,7 +1459,15 @@ in
             graphrag-core will reject the template at runtime.
           '';
         }
-      ];
+      ] ++ lib.flatten (lib.mapAttrsToList (name: kind: [
+        {
+          assertion = lib.hasPrefix "/" kind.pathPrefix;
+          message = ''
+            services.graphrag-rs.recall.kinds.${name}.pathPrefix must be
+            an absolute path (must start with "/"), got: ${kind.pathPrefix}
+          '';
+        }
+      ]) cfg.recall.kinds);
     }
     {
     home.packages = lib.mkIf cfg.installMcp [ cfg.mcpPackage ];
