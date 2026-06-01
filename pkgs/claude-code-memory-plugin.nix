@@ -24,7 +24,7 @@
 #
 # Output:
 #   $out/skills/<name>/SKILL.md     — pass to programs.claude-code.skills
-#   $out/CLAUDE.md                   — pass to programs.claude-code.memory.source
+#   $out/CLAUDE.md                   — pass to programs.claude-code.context
 #   passthru.mkStalenessHook { ... } — host-baked UserPromptSubmit script
 #
 # Host-independent: no MCP URL, no session id, no hooks JSON. The

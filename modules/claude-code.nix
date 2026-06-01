@@ -10,7 +10,7 @@
 #
 #   programs.claude-code.mcpServers.memory  → recall/remember/forget/status MCP
 #   programs.claude-code.skills.<name>      → the four memory skills
-#   programs.claude-code.memory.source      → ~/.claude/CLAUDE.md
+#   programs.claude-code.context             → ~/.claude/CLAUDE.md
 #   programs.claude-code.settings.hooks     → UserPromptSubmit staleness check
 #
 # Bumping graphrag-rs-nix's flake input rolls the MCP server, hooks,
@@ -146,7 +146,9 @@ in
         ]);
 
       programs.claude-code = {
-        memory.source = "${assets}/CLAUDE.md";
+        # 26.05: HM combined `memory.{text,source}` into a single `context`
+        # option (lines | path). We pass a store path.
+        context = "${assets}/CLAUDE.md";
 
         mcpServers.memory = {
           type = "stdio";
